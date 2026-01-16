@@ -195,6 +195,12 @@ export class Grid {
         circularStartDelay + i * phaseDelay,
       );
     }
+
+    const broadcastStartDelay =
+      circularStartDelay + circularIterations * phaseDelay;
+    setTimeout(() => {
+      this.broadcast();
+    }, broadcastStartDelay);
   }
 
   allReduceVerticalPhase(phase) {
@@ -251,5 +257,86 @@ export class Grid {
     this.sendPacket(centerRow2, centerCol1, centerRow2, centerCol2, 600);
     this.sendPacket(centerRow2, centerCol2, centerRow1, centerCol2, 600);
     this.sendPacket(centerRow1, centerCol2, centerRow1, centerCol1, 600);
+  }
+
+  broadcast() {
+    const isEvenCols = this.cols % 2 === 0;
+    const centerCol1 = Math.floor((this.cols - 1) / 2);
+    const centerCol2 = isEvenCols ? centerCol1 + 1 : centerCol1;
+    const isEvenRows = this.rows % 2 === 0;
+    const centerRow1 = Math.floor((this.rows - 1) / 2);
+    const centerRow2 = isEvenRows ? centerRow1 + 1 : centerRow1;
+
+    const visited = new Set();
+    const queue = [];
+
+    for (let row = centerRow1; row <= centerRow2; row++) {
+      for (let col = centerCol1; col <= centerCol2; col++) {
+        const pe = this.getPE(row, col);
+        if (pe) {
+          pe.activate();
+          queue.push({ row, col, isCenter: true, isCenterCol: true });
+          visited.add(`${row},${col}`);
+        }
+      }
+    }
+
+    const broadcastStep = (step) => {
+      if (queue.length === 0) return;
+
+      const nextQueue = [];
+      const delay = 450;
+
+      for (const item of queue) {
+        const { row, col, isCenter, isCenterCol } = item;
+        const pe = this.getPE(row, col);
+        if (!pe) continue;
+
+        if (isCenter || isCenterCol) {
+          const up = this.getPE(row - 1, col);
+          const down = this.getPE(row + 1, col);
+
+          if (up && !visited.has(`${row - 1},${col}`)) {
+            up.activate();
+            this.sendPacket(row, col, row - 1, col, 600);
+            visited.add(`${row - 1},${col}`);
+            nextQueue.push({ row: row - 1, col, isCenterCol: true });
+          }
+
+          if (down && !visited.has(`${row + 1},${col}`)) {
+            down.activate();
+            this.sendPacket(row, col, row + 1, col, 600);
+            visited.add(`${row + 1},${col}`);
+            nextQueue.push({ row: row + 1, col, isCenterCol: true });
+          }
+        }
+
+        const left = this.getPE(row, col - 1);
+        const right = this.getPE(row, col + 1);
+
+        if (left && !visited.has(`${row},${col - 1}`)) {
+          left.activate();
+          this.sendPacket(row, col, row, col - 1, 600);
+          visited.add(`${row},${col - 1}`);
+          nextQueue.push({ row, col: col - 1 });
+        }
+
+        if (right && !visited.has(`${row},${col + 1}`)) {
+          right.activate();
+          this.sendPacket(row, col, row, col + 1, 600);
+          visited.add(`${row},${col + 1}`);
+          nextQueue.push({ row, col: col + 1 });
+        }
+      }
+
+      queue.length = 0;
+      queue.push(...nextQueue);
+
+      if (queue.length > 0) {
+        setTimeout(() => broadcastStep(step + 1), delay);
+      }
+    };
+
+    broadcastStep(0);
   }
 }
