@@ -11,6 +11,7 @@ export class PE {
     this.onDuration = 500;
     this.activationTime = 0;
     this.active = false;
+    this.value = 0;
   }
 
   activate() {
@@ -19,7 +20,7 @@ export class PE {
     this.startBrightness = this.brightness;
     this.targetBrightness = 1;
     this.transitionStartTime = Date.now();
-    this.transitionDuration = 50;
+    this.transitionDuration = 75;
   }
 
   update() {

@@ -100,10 +100,19 @@ function setupEventListeners() {
   document
     .getElementById("startBtn")
     .addEventListener("click", startSimulation);
+  document
+    .getElementById("allReduceFullBtn")
+    .addEventListener("click", startAllReduceFull);
   document.getElementById("stopBtn").addEventListener("click", stopSimulation);
   document
     .getElementById("resetBtn")
     .addEventListener("click", resetSimulation);
+}
+
+function startAllReduceFull() {
+  stopSimulation();
+  animationLoop.start();
+  grid.runAllReduce();
 }
 
 document.addEventListener("DOMContentLoaded", init);
