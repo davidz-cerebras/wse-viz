@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cerebras Wafer-Scale Engine Visualizer</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>Wafer-Scale Engine Visualizer</h1>
+        <div class="controls">
+          <button id="startBtn">Start</button>
+          <button id="stopBtn">Stop</button>
+          <button id="resetBtn">Reset</button>
+        </div>
+      </header>
+      <main>
+        <canvas id="wseCanvas"></canvas>
+      </main>
+      <footer>
+        <div class="stats">
+          <span id="peCount">PEs: 0</span>
+          <span id="activePEs">Active: 0</span>
+          <span id="dataTransfers">Transfers: 0</span>
+        </div>
+      </footer>
+    </div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
