@@ -160,7 +160,7 @@ export class Grid {
 
   runAllReduce() {
     const maxPhase = Math.ceil(this.cols / 2);
-    const phaseDelay = 700;
+    const phaseDelay = 450;
 
     for (let phase = 1; phase <= maxPhase; phase++) {
       setTimeout(
@@ -170,5 +170,86 @@ export class Grid {
         (phase - 1) * phaseDelay,
       );
     }
+
+    const verticalStartDelay = maxPhase * phaseDelay;
+    const maxVerticalPhase = Math.ceil(this.rows / 2);
+
+    for (let phase = 1; phase <= maxVerticalPhase; phase++) {
+      setTimeout(
+        () => {
+          this.allReduceVerticalPhase(phase);
+        },
+        verticalStartDelay + (phase - 1) * phaseDelay,
+      );
+    }
+
+    const circularStartDelay =
+      verticalStartDelay + maxVerticalPhase * phaseDelay;
+    const circularIterations = 3;
+
+    for (let i = 0; i < circularIterations; i++) {
+      setTimeout(
+        () => {
+          this.circularExchange();
+        },
+        circularStartDelay + i * phaseDelay,
+      );
+    }
+  }
+
+  allReduceVerticalPhase(phase) {
+    const isEvenCols = this.cols % 2 === 0;
+    const centerCol1 = Math.floor((this.cols - 1) / 2);
+    const centerCol2 = isEvenCols ? centerCol1 + 1 : centerCol1;
+    const isEvenRows = this.rows % 2 === 0;
+    const centerRow1 = Math.floor((this.rows - 1) / 2);
+    const centerRow2 = isEvenRows ? centerRow1 + 1 : centerRow1;
+    const excludeCount = phase - 1;
+
+    for (let col = centerCol1; col <= centerCol2; col++) {
+      for (let row = 0; row < this.rows; row++) {
+        if (row < excludeCount || row >= this.rows - excludeCount) continue;
+
+        const pe = this.getPE(row, col);
+        pe.activate();
+
+        if (row === centerRow1 || row === centerRow2) continue;
+
+        let nextRow;
+        if (row < centerRow1) {
+          nextRow = row + 1;
+        } else if (row > centerRow2) {
+          nextRow = row - 1;
+        } else {
+          nextRow = row < centerRow2 ? centerRow1 : centerRow2;
+        }
+
+        this.sendPacket(row, col, nextRow, col, 600);
+      }
+    }
+  }
+
+  circularExchange() {
+    const isEvenCols = this.cols % 2 === 0;
+    const centerCol1 = Math.floor((this.cols - 1) / 2);
+    const centerCol2 = isEvenCols ? centerCol1 + 1 : centerCol1;
+    const isEvenRows = this.rows % 2 === 0;
+    const centerRow1 = Math.floor((this.rows - 1) / 2);
+    const centerRow2 = isEvenRows ? centerRow1 + 1 : centerRow1;
+
+    const topLeft = this.getPE(centerRow1, centerCol1);
+    const topRight = this.getPE(centerRow1, centerCol2);
+    const bottomRight = this.getPE(centerRow2, centerCol2);
+    const bottomLeft = this.getPE(centerRow2, centerCol1);
+
+    if (topLeft) topLeft.activate();
+    if (topRight) topRight.activate();
+    if (bottomRight) bottomRight.activate();
+    if (bottomLeft) bottomLeft.activate();
+
+    this.sendPacket(centerRow1, centerCol1, centerRow2, centerCol1, 600);
+    this.sendPacket(centerRow2, centerCol1, centerRow2, centerCol2, 600);
+    this.sendPacket(centerRow2, centerCol2, centerRow1, centerCol2, 600);
+    this.sendPacket(centerRow1, centerCol2, centerRow1, centerCol1, 600);
   }
 }
