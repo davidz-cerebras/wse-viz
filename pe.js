@@ -45,6 +45,14 @@ export class PE {
   draw(ctx) {
     const baseAlpha = 0.3 + this.brightness * 0.7;
 
+    if (this.brightness > 0.1) {
+      ctx.shadowColor = `rgba(100, 181, 246, ${this.brightness * 0.6})`;
+      ctx.shadowBlur = this.brightness * 15;
+    } else {
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur = 0;
+    }
+
     ctx.fillStyle = `rgba(${45 + this.brightness * 55}, ${58 + this.brightness * 123}, ${90 + this.brightness * 156}, ${baseAlpha})`;
     ctx.fillRect(this.x, this.y, this.size, this.size);
 
@@ -53,5 +61,8 @@ export class PE {
       ctx.lineWidth = 2;
       ctx.strokeRect(this.x, this.y, this.size, this.size);
     }
+
+    ctx.shadowColor = "transparent";
+    ctx.shadowBlur = 0;
   }
 }

@@ -43,6 +43,9 @@ export class DataPacket {
   draw(ctx, currentTime) {
     const { x, y, alpha } = this.getCurrentPosition(currentTime);
 
+    ctx.shadowColor = `rgba(255, 193, 7, ${alpha})`;
+    ctx.shadowBlur = alpha * 25;
+
     ctx.beginPath();
     ctx.arc(x, y, this.size, 0, Math.PI * 2);
     ctx.fillStyle = `rgba(255, 193, 7, ${alpha})`;
@@ -53,5 +56,8 @@ export class DataPacket {
     ctx.strokeStyle = `rgba(255, 193, 7, ${alpha * 0.5})`;
     ctx.lineWidth = 2;
     ctx.stroke();
+
+    ctx.shadowColor = "transparent";
+    ctx.shadowBlur = 0;
   }
 }
