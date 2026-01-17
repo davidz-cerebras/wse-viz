@@ -166,7 +166,7 @@ export class Grid {
     }
   }
 
-  runAllReduce(speedMultiplier = 1) {
+  runAllReduce(speedMultiplier = 1, onComplete) {
     const maxPhase = Math.ceil(this.cols / 2);
     const phaseDelay = 450 / speedMultiplier;
 
@@ -207,7 +207,7 @@ export class Grid {
     const broadcastStartDelay =
       circularStartDelay + circularIterations * phaseDelay;
     setTimeout(() => {
-      this.broadcast(speedMultiplier);
+      this.broadcast(speedMultiplier, onComplete);
     }, broadcastStartDelay);
   }
 
@@ -267,7 +267,7 @@ export class Grid {
     this.sendPacket(centerRow1, centerCol2, centerRow1, centerCol1, 600);
   }
 
-  broadcast(speedMultiplier = 1) {
+  broadcast(speedMultiplier = 1, onComplete) {
     const isEvenCols = this.cols % 2 === 0;
     const centerCol1 = Math.floor((this.cols - 1) / 2);
     const centerCol2 = isEvenCols ? centerCol1 + 1 : centerCol1;
@@ -290,7 +290,10 @@ export class Grid {
     }
 
     const broadcastStep = (step) => {
-      if (queue.length === 0) return;
+      if (queue.length === 0) {
+        if (onComplete) onComplete();
+        return;
+      }
 
       const nextQueue = [];
       const delay = 450 / speedMultiplier;
@@ -342,13 +345,15 @@ export class Grid {
 
       if (queue.length > 0) {
         setTimeout(() => broadcastStep(step + 1), delay);
+      } else {
+        if (onComplete) onComplete();
       }
     };
 
     broadcastStep(0);
   }
 
-  spmvPattern(speedMultiplier = 1) {
+  spmvPattern(speedMultiplier = 1, onComplete) {
     const hopDelay = 300 / speedMultiplier;
     const packetQueue = [];
 
@@ -359,15 +364,15 @@ export class Grid {
 
         pe.activate();
 
-        const numTargets = Math.floor(Math.random() * 5) + 1;
+        const numTargets = Math.floor(Math.random() * 10) + 1;
         const targets = new Set();
         let attempts = 0;
         const maxAttempts = 100;
 
         while (targets.size < numTargets && attempts < maxAttempts) {
           attempts++;
-          const targetRow = row + Math.floor(Math.random() * 3) - 1;
-          const targetCol = col + Math.floor(Math.random() * 3) - 1;
+          const targetRow = row + Math.floor(Math.random() * 7) - 3;
+          const targetCol = col + Math.floor(Math.random() * 7) - 3;
 
           if (
             targetRow >= 0 &&
@@ -474,14 +479,19 @@ export class Grid {
     };
 
     const scheduledPackets = schedulePackets();
+    let maxCycle = 0;
+    let maxDistance = 0;
 
     scheduledPackets.forEach(({ packet, cycle }) => {
+      maxCycle = Math.max(maxCycle, cycle);
+      const distance =
+        Math.abs(packet.toRow - packet.fromRow) +
+        Math.abs(packet.toCol - packet.fromCol);
+      maxDistance = Math.max(maxDistance, distance);
+
       setTimeout(() => {
         const targetPE = this.getPE(packet.toRow, packet.toCol);
         if (targetPE) {
-          const distance =
-            Math.abs(packet.toRow - packet.fromRow) +
-            Math.abs(packet.toCol - packet.fromCol);
           setTimeout(() => {
             targetPE.activate();
           }, hopDelay * distance);
@@ -499,5 +509,94 @@ export class Grid {
         }
       }, cycle * hopDelay);
     });
+
+    if (onComplete) {
+      const totalDuration = (maxCycle + maxDistance) * hopDelay + 200;
+      setTimeout(onComplete, totalDuration);
+    }
+  }
+
+  conjugateGradient(iterations = 5, speedMultiplier = 1, onStep) {
+    const runStep = (step, stepIndex, iter, callback) => {
+      if (onStep) {
+        onStep(iter, stepIndex, step);
+      }
+
+      if (step.type === "spmv") {
+        this.spmvPattern(speedMultiplier, callback);
+      } else if (step.type === "dot") {
+        this.runAllReduce(speedMultiplier * 2, callback);
+      } else if (step.type === "axpy") {
+        for (let row = 0; row < this.rows; row++) {
+          for (let col = 0; col < this.cols; col++) {
+            const pe = this.getPE(row, col);
+            if (pe) {
+              pe.activate();
+            }
+          }
+        }
+        setTimeout(callback, 600 / speedMultiplier);
+      } else if (step.type === "check") {
+        setTimeout(callback, 400 / speedMultiplier);
+      }
+    };
+
+    const runIteration = (iter, callback) => {
+      const steps = [
+        { name: "SpMV: Ap = A × p", type: "spmv", line: 4 },
+        { name: "Dot: α = (rᵀr) / (pᵀAp)", type: "dot", line: 5 },
+        { name: "AXPY: x = x + αp", type: "axpy", line: 6 },
+        { name: "AXPY: r = r - αAp", type: "axpy", line: 7 },
+        { name: "Dot: β = (rᵀr) / (rᵀr)₍ₖ₋₁₎", type: "dot", line: 8 },
+        { name: "AXPY: p = r + βp", type: "axpy", line: 9 },
+        { name: "Check convergence", type: "check", line: 10 },
+      ];
+
+      let stepIndex = 0;
+
+      const runNextStep = () => {
+        if (stepIndex < steps.length) {
+          const step = steps[stepIndex];
+          runStep(step, stepIndex, iter, () => {
+            stepIndex++;
+            runNextStep();
+          });
+        } else if (callback) {
+          callback();
+        }
+      };
+
+      runNextStep();
+    };
+
+    setTimeout(() => {
+      for (let row = 0; row < this.rows; row++) {
+        for (let col = 0; col < this.cols; col++) {
+          const pe = this.getPE(row, col);
+          if (pe) {
+            pe.activate();
+          }
+        }
+      }
+      if (onStep)
+        onStep("init", 0, {
+          name: "Initialize: r = b - Ax₀, p = r",
+          type: "init",
+          line: 1,
+        });
+
+      let currentIteration = 0;
+
+      const runNextIteration = () => {
+        if (currentIteration < iterations) {
+          runIteration(currentIteration, () => {
+            currentIteration++;
+            runNextIteration();
+          });
+        }
+      };
+
+      setTimeout(runNextIteration, 800 / speedMultiplier);
+    }, 0);
   }
 }

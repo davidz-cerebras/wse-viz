@@ -14,8 +14,7 @@
           <button id="startBtn">Random</button>
           <button id="allReduceFullBtn">AllReduce</button>
           <button id="spmvBtn">SpMV</button>
-          <button id="stopBtn">Stop</button>
-          <button id="resetBtn">Reset</button>
+          <button id="cgBtn">Conjugate Gradient</button>
           <div class="speed-control">
             <label for="speedSlider">Speed:</label>
             <input
@@ -24,14 +23,78 @@
               min="0.25"
               max="8"
               step="0.25"
-              value="1"
+              value="4"
             />
-            <span id="speedValue">1x</span>
+            <span id="speedValue">4x</span>
           </div>
         </div>
       </header>
       <main>
-        <canvas id="wseCanvas"></canvas>
+        <div class="canvas-container">
+          <canvas id="wseCanvas"></canvas>
+        </div>
+        <div class="code-panel">
+          <h2>Conjugate Gradient Algorithm</h2>
+          <div class="code-content">
+            <div class="code-line" data-line="1">
+              <span class="line-number">1</span>
+              <span class="line-text">r = b - Ax₀</span>
+            </div>
+            <div class="code-line" data-line="2">
+              <span class="line-number">2</span>
+              <span class="line-text">p = r</span>
+            </div>
+            <div class="code-line" data-line="3">
+              <span class="line-number">3</span>
+              <span class="line-text">for k = 0 to max_iter-1:</span>
+            </div>
+            <div class="code-line" data-line="4">
+              <span class="line-number">4</span>
+              <span class="line-text"> Ap = A × p</span>
+            </div>
+            <div class="code-line" data-line="5">
+              <span class="line-number">5</span>
+              <span class="line-text"> α = (rᵀr) / (pᵀAp)</span>
+            </div>
+            <div class="code-line" data-line="6">
+              <span class="line-number">6</span>
+              <span class="line-text"> x = x + αp</span>
+            </div>
+            <div class="code-line" data-line="7">
+              <span class="line-number">7</span>
+              <span class="line-text"> r = r - αAp</span>
+            </div>
+            <div class="code-line" data-line="8">
+              <span class="line-number">8</span>
+              <span class="line-text"> β = (rᵀr) / (rᵀr)₍ₖ₋₁₎</span>
+            </div>
+            <div class="code-line" data-line="9">
+              <span class="line-number">9</span>
+              <span class="line-text"> p = r + βp</span>
+            </div>
+            <div class="code-line" data-line="10">
+              <span class="line-number">10</span>
+              <span class="line-text"> if ‖r‖ < ε: break</span>
+            </div>
+          </div>
+          <div class="status-panel">
+            <h3>Execution Status</h3>
+            <div class="status-content">
+              <div class="status-item">
+                <span class="status-label">Iteration:</span>
+                <span class="status-value" id="iterationValue">-</span>
+              </div>
+              <div class="status-item">
+                <span class="status-label">Current Step:</span>
+                <span class="status-value" id="stepValue">-</span>
+              </div>
+              <div class="status-item">
+                <span class="status-label">Operation:</span>
+                <span class="status-value" id="operationValue">-</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </main>
       <footer>
         <div class="stats">

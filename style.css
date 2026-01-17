@@ -107,13 +107,27 @@ header h1 {
   background: linear-gradient(135deg, #f55c4f, #f44336);
 }
 
+#cgBtn {
+  background: linear-gradient(135deg, #9c27b0, #7b1fa2);
+}
+
+#cgBtn:hover {
+  background: linear-gradient(135deg, #ab47bc, #9c27b0);
+}
+
 main {
   flex: 1;
   display: flex;
-  justify-content: center;
-  align-items: center;
+  gap: 2rem;
   padding: 2rem;
   background: #0d1121;
+}
+
+.canvas-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex: 1;
 }
 
 canvas {
@@ -121,6 +135,102 @@ canvas {
   border-radius: 8px;
   background: #0a0e27;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+
+.code-panel {
+  width: 400px;
+  background: #1a1f3a;
+  border: 2px solid #2d3a5a;
+  border-radius: 8px;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+
+.code-panel h2 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: #64b5f6;
+  margin-bottom: 0.5rem;
+}
+
+.code-content {
+  background: #0d1121;
+  border: 1px solid #2d3a5a;
+  border-radius: 6px;
+  padding: 1rem;
+  font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
+  font-size: 0.85rem;
+}
+
+.code-line {
+  display: flex;
+  gap: 1rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+.code-line.active {
+  background: rgba(100, 181, 246, 0.2);
+  border-left: 3px solid #64b5f6;
+}
+
+.line-number {
+  color: #5c6b8a;
+  min-width: 20px;
+  text-align: right;
+  user-select: none;
+}
+
+.line-text {
+  color: #b0b8d4;
+  flex: 1;
+}
+
+.code-line.active .line-text {
+  color: #ffffff;
+  font-weight: 500;
+}
+
+.status-panel {
+  background: #0d1121;
+  border: 1px solid #2d3a5a;
+  border-radius: 6px;
+  padding: 1rem;
+}
+
+.status-panel h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #64b5f6;
+  margin-bottom: 0.75rem;
+}
+
+.status-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.status-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.status-label {
+  color: #5c6b8a;
+  font-size: 0.85rem;
+}
+
+.status-value {
+  color: #ffffff;
+  font-size: 0.9rem;
+  font-weight: 500;
+  font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
 }
 
 footer {

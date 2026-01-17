@@ -11,7 +11,7 @@ let animationLoop;
 let canvas;
 let ctx;
 let simulationInterval;
-let speedMultiplier = 1;
+let speedMultiplier = 4;
 
 function init() {
   canvas = document.getElementById("wseCanvas");
@@ -89,14 +89,6 @@ function stopSimulation() {
   animationLoop.stop();
 }
 
-function resetSimulation() {
-  stopSimulation();
-  grid.init();
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  grid.draw(ctx);
-  updateStats();
-}
-
 function setupEventListeners() {
   document
     .getElementById("startBtn")
@@ -105,10 +97,7 @@ function setupEventListeners() {
     .getElementById("allReduceFullBtn")
     .addEventListener("click", startAllReduceFull);
   document.getElementById("spmvBtn").addEventListener("click", startSpMV);
-  document.getElementById("stopBtn").addEventListener("click", stopSimulation);
-  document
-    .getElementById("resetBtn")
-    .addEventListener("click", resetSimulation);
+  document.getElementById("cgBtn").addEventListener("click", startCG);
 
   const speedSlider = document.getElementById("speedSlider");
   const speedValue = document.getElementById("speedValue");
@@ -128,6 +117,48 @@ function startSpMV() {
   stopSimulation();
   animationLoop.start();
   grid.spmvPattern(speedMultiplier);
+}
+
+function startCG() {
+  stopSimulation();
+  animationLoop.start();
+  clearCodeHighlight();
+  grid.conjugateGradient(5, speedMultiplier, updateCodePanel);
+}
+
+function clearCodeHighlight() {
+  document.querySelectorAll(".code-line").forEach((line) => {
+    line.classList.remove("active");
+  });
+}
+
+function updateCodePanel(iteration, stepIndex, step) {
+  clearCodeHighlight();
+
+  const lineNumber = step.line;
+  const line = document.querySelector(`.code-line[data-line="${lineNumber}"]`);
+
+  if (line) {
+    line.classList.add("active");
+  }
+
+  const iterationValue = document.getElementById("iterationValue");
+  const stepValue = document.getElementById("stepValue");
+  const operationValue = document.getElementById("operationValue");
+
+  if (iteration === "init") {
+    iterationValue.textContent = "Init";
+    stepValue.textContent = "-";
+    const initLines = document.querySelectorAll(
+      '.code-line[data-line="1"], .code-line[data-line="2"]',
+    );
+    initLines.forEach((l) => l.classList.add("active"));
+  } else {
+    iterationValue.textContent = `${iteration + 1}/5`;
+    stepValue.textContent = `${stepIndex + 1}/7`;
+  }
+
+  operationValue.textContent = step.name;
 }
 
 document.addEventListener("DOMContentLoaded", init);
