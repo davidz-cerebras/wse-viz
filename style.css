@@ -42,6 +42,32 @@ header h1 {
 .controls {
   display: flex;
   gap: 0.5rem;
+  align-items: center;
+}
+
+.speed-control {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: 1rem;
+  padding-left: 1rem;
+  border-left: 1px solid #2d3a5a;
+}
+
+.speed-control label {
+  font-size: 0.9rem;
+  color: #b0b8d4;
+}
+
+.speed-control input[type="range"] {
+  width: 100px;
+  cursor: pointer;
+}
+
+.speed-control span {
+  font-size: 0.9rem;
+  color: #b0b8d4;
+  min-width: 30px;
 }
 
 .controls button {

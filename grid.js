@@ -1,5 +1,6 @@
 import { PE } from "./pe.js";
 import { DataPacket } from "./packet.js";
+import { MultiHopPacket } from "./multihop-packet.js";
 
 export class Grid {
   constructor(rows, cols, cellSize, gap) {
@@ -14,6 +15,7 @@ export class Grid {
 
   init() {
     this.pes = [];
+    this.packets = [];
     for (let row = 0; row < this.rows; row++) {
       for (let col = 0; col < this.cols; col++) {
         const x = col * (this.cellSize + this.gap) + this.gap;
@@ -64,7 +66,13 @@ export class Grid {
 
   draw(ctx) {
     this.pes.forEach((pe) => pe.draw(ctx));
-    this.packets.forEach((packet) => packet.draw(ctx, Date.now()));
+    this.packets.forEach((packet) => {
+      if (packet instanceof MultiHopPacket) {
+        packet.draw(ctx, Date.now(), this);
+      } else {
+        packet.draw(ctx, Date.now());
+      }
+    });
   }
 
   getActivePECount() {
@@ -158,9 +166,9 @@ export class Grid {
     }
   }
 
-  runAllReduce() {
+  runAllReduce(speedMultiplier = 1) {
     const maxPhase = Math.ceil(this.cols / 2);
-    const phaseDelay = 450;
+    const phaseDelay = 450 / speedMultiplier;
 
     for (let phase = 1; phase <= maxPhase; phase++) {
       setTimeout(
@@ -199,7 +207,7 @@ export class Grid {
     const broadcastStartDelay =
       circularStartDelay + circularIterations * phaseDelay;
     setTimeout(() => {
-      this.broadcast();
+      this.broadcast(speedMultiplier);
     }, broadcastStartDelay);
   }
 
@@ -259,7 +267,7 @@ export class Grid {
     this.sendPacket(centerRow1, centerCol2, centerRow1, centerCol1, 600);
   }
 
-  broadcast() {
+  broadcast(speedMultiplier = 1) {
     const isEvenCols = this.cols % 2 === 0;
     const centerCol1 = Math.floor((this.cols - 1) / 2);
     const centerCol2 = isEvenCols ? centerCol1 + 1 : centerCol1;
@@ -285,7 +293,7 @@ export class Grid {
       if (queue.length === 0) return;
 
       const nextQueue = [];
-      const delay = 450;
+      const delay = 450 / speedMultiplier;
 
       for (const item of queue) {
         const { row, col, isCenter, isCenterCol } = item;
@@ -338,5 +346,158 @@ export class Grid {
     };
 
     broadcastStep(0);
+  }
+
+  spmvPattern(speedMultiplier = 1) {
+    const hopDelay = 300 / speedMultiplier;
+    const packetQueue = [];
+
+    for (let row = 0; row < this.rows; row++) {
+      for (let col = 0; col < this.cols; col++) {
+        const pe = this.getPE(row, col);
+        if (!pe) continue;
+
+        pe.activate();
+
+        const numTargets = Math.floor(Math.random() * 5) + 1;
+        const targets = new Set();
+        let attempts = 0;
+        const maxAttempts = 100;
+
+        while (targets.size < numTargets && attempts < maxAttempts) {
+          attempts++;
+          const targetRow = row + Math.floor(Math.random() * 3) - 1;
+          const targetCol = col + Math.floor(Math.random() * 3) - 1;
+
+          if (
+            targetRow >= 0 &&
+            targetRow < this.rows &&
+            targetCol >= 0 &&
+            targetCol < this.cols &&
+            (targetRow !== row || targetCol !== col)
+          ) {
+            targets.add(`${targetRow},${targetCol}`);
+          }
+        }
+
+        targets.forEach((targetKey) => {
+          const [targetRow, targetCol] = targetKey.split(",").map(Number);
+          packetQueue.push({
+            fromRow: row,
+            fromCol: col,
+            toRow: targetRow,
+            toCol: targetCol,
+          });
+        });
+      }
+    }
+
+    const getPacketPath = (packet) => {
+      const path = [];
+      let currentRow = packet.fromRow;
+      let currentCol = packet.fromCol;
+
+      const horizontalDirection = packet.toCol > packet.fromCol ? 1 : -1;
+      const verticalDirection = packet.toRow > packet.fromRow ? 1 : -1;
+
+      const horizontalSteps = Math.abs(packet.toCol - packet.fromCol);
+      const verticalSteps = Math.abs(packet.toRow - packet.fromRow);
+
+      for (let i = 0; i < horizontalSteps; i++) {
+        const nextCol = currentCol + horizontalDirection;
+        path.push({
+          from: { row: currentRow, col: currentCol },
+          to: { row: currentRow, col: nextCol },
+        });
+        currentCol = nextCol;
+      }
+
+      for (let i = 0; i < verticalSteps; i++) {
+        const nextRow = currentRow + verticalDirection;
+        path.push({
+          from: { row: currentRow, col: currentCol },
+          to: { row: nextRow, col: currentCol },
+        });
+        currentRow = nextRow;
+      }
+
+      return path;
+    };
+
+    const getLinkId = (from, to) => {
+      if (from.row === to.row) {
+        const minCol = Math.min(from.col, to.col);
+        return `h-${from.row}-${minCol}`;
+      } else {
+        const minRow = Math.min(from.row, to.row);
+        return `v-${minRow}-${from.col}`;
+      }
+    };
+
+    const schedulePackets = () => {
+      const scheduled = [];
+      const unscheduled = [...packetQueue];
+      let cycle = 0;
+
+      while (unscheduled.length > 0) {
+        const cycleLinks = new Set();
+        const cyclePackets = [];
+
+        for (let i = unscheduled.length - 1; i >= 0; i--) {
+          const packet = unscheduled[i];
+          const path = getPacketPath(packet);
+          let canSchedule = true;
+
+          for (const hop of path) {
+            const linkId = getLinkId(hop.from, hop.to);
+            if (cycleLinks.has(linkId)) {
+              canSchedule = false;
+              break;
+            }
+          }
+
+          if (canSchedule) {
+            for (const hop of path) {
+              const linkId = getLinkId(hop.from, hop.to);
+              cycleLinks.add(linkId);
+            }
+            cyclePackets.push({ packet, cycle });
+            unscheduled.splice(i, 1);
+          }
+        }
+
+        scheduled.push(...cyclePackets);
+        cycle++;
+      }
+
+      return scheduled;
+    };
+
+    const scheduledPackets = schedulePackets();
+
+    scheduledPackets.forEach(({ packet, cycle }) => {
+      setTimeout(() => {
+        const targetPE = this.getPE(packet.toRow, packet.toCol);
+        if (targetPE) {
+          const distance =
+            Math.abs(packet.toRow - packet.fromRow) +
+            Math.abs(packet.toCol - packet.fromCol);
+          setTimeout(() => {
+            targetPE.activate();
+          }, hopDelay * distance);
+
+          this.packets.push(
+            new MultiHopPacket(
+              packet.fromRow,
+              packet.fromCol,
+              packet.toRow,
+              packet.toCol,
+              Date.now(),
+              hopDelay,
+            ),
+          );
+        }
+      }, cycle * hopDelay);
+    });
   }
 }

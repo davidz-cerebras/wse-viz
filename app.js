@@ -11,6 +11,7 @@ let animationLoop;
 let canvas;
 let ctx;
 let simulationInterval;
+let speedMultiplier = 1;
 
 function init() {
   canvas = document.getElementById("wseCanvas");
@@ -103,16 +104,30 @@ function setupEventListeners() {
   document
     .getElementById("allReduceFullBtn")
     .addEventListener("click", startAllReduceFull);
+  document.getElementById("spmvBtn").addEventListener("click", startSpMV);
   document.getElementById("stopBtn").addEventListener("click", stopSimulation);
   document
     .getElementById("resetBtn")
     .addEventListener("click", resetSimulation);
+
+  const speedSlider = document.getElementById("speedSlider");
+  const speedValue = document.getElementById("speedValue");
+  speedSlider.addEventListener("input", (e) => {
+    speedMultiplier = parseFloat(e.target.value);
+    speedValue.textContent = `${speedMultiplier}x`;
+  });
 }
 
 function startAllReduceFull() {
   stopSimulation();
   animationLoop.start();
-  grid.runAllReduce();
+  grid.runAllReduce(speedMultiplier);
+}
+
+function startSpMV() {
+  stopSimulation();
+  animationLoop.start();
+  grid.spmvPattern(speedMultiplier);
 }
 
 document.addEventListener("DOMContentLoaded", init);
