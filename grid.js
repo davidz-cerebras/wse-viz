@@ -599,4 +599,254 @@ export class Grid {
       setTimeout(runNextIteration, 800 / speedMultiplier);
     }, 0);
   }
+
+  fftRowStage(stage, speedMultiplier, onComplete) {
+    const distance = Math.pow(2, stage - 1);
+    const delay = 600 / speedMultiplier;
+
+    for (let row = 0; row < this.rows; row++) {
+      for (let col = 0; col < this.cols; col++) {
+        const partnerCol = col ^ distance;
+
+        if (partnerCol > col && partnerCol < this.cols) {
+          this.activatePE(row, col);
+          this.activatePE(row, partnerCol);
+
+          this.sendPacket(row, col, row, partnerCol, delay);
+          this.sendPacket(row, partnerCol, row, col, delay);
+        }
+      }
+    }
+
+    if (onComplete) {
+      setTimeout(onComplete, delay + 100);
+    }
+  }
+
+  fftColumnStage(stage, speedMultiplier, onComplete) {
+    const distance = Math.pow(2, stage - 1);
+    const delay = 600 / speedMultiplier;
+
+    for (let col = 0; col < this.cols; col++) {
+      for (let row = 0; row < this.rows; row++) {
+        const partnerRow = row ^ distance;
+
+        if (partnerRow > row && partnerRow < this.rows) {
+          this.activatePE(row, col);
+          this.activatePE(partnerRow, col);
+
+          this.sendPacket(row, col, partnerRow, col, delay);
+          this.sendPacket(partnerRow, col, row, col, delay);
+        }
+      }
+    }
+
+    if (onComplete) {
+      setTimeout(onComplete, delay + 100);
+    }
+  }
+
+  transposeMatrix(speedMultiplier, onComplete) {
+    const hopDelay = 300 / speedMultiplier;
+    const packetQueue = [];
+
+    for (let row = 0; row < this.rows; row++) {
+      for (let col = row + 1; col < this.cols; col++) {
+        packetQueue.push({
+          fromRow: row,
+          fromCol: col,
+          toRow: col,
+          toCol: row,
+        });
+      }
+    }
+
+    const getPacketPath = (packet) => {
+      const path = [];
+      let currentRow = packet.fromRow;
+      let currentCol = packet.fromCol;
+
+      const horizontalDirection = packet.toCol > packet.fromCol ? 1 : -1;
+      const verticalDirection = packet.toRow > packet.fromRow ? 1 : -1;
+
+      const horizontalSteps = Math.abs(packet.toCol - packet.fromCol);
+      const verticalSteps = Math.abs(packet.toRow - packet.fromRow);
+
+      for (let i = 0; i < horizontalSteps; i++) {
+        const nextCol = currentCol + horizontalDirection;
+        path.push({
+          from: { row: currentRow, col: currentCol },
+          to: { row: currentRow, col: nextCol },
+        });
+        currentCol = nextCol;
+      }
+
+      for (let i = 0; i < verticalSteps; i++) {
+        const nextRow = currentRow + verticalDirection;
+        path.push({
+          from: { row: currentRow, col: currentCol },
+          to: { row: nextRow, col: currentCol },
+        });
+        currentRow = nextRow;
+      }
+
+      return path;
+    };
+
+    const getLinkId = (from, to) => {
+      if (from.row === to.row) {
+        const minCol = Math.min(from.col, to.col);
+        return `h-${from.row}-${minCol}`;
+      } else {
+        const minRow = Math.min(from.row, to.row);
+        return `v-${minRow}-${from.col}`;
+      }
+    };
+
+    const schedulePackets = () => {
+      const scheduled = [];
+      const unscheduled = [...packetQueue];
+      let cycle = 0;
+
+      while (unscheduled.length > 0) {
+        const cycleLinks = new Set();
+        const cyclePackets = [];
+
+        for (let i = unscheduled.length - 1; i >= 0; i--) {
+          const packet = unscheduled[i];
+          const path = getPacketPath(packet);
+          let canSchedule = true;
+
+          for (const hop of path) {
+            const linkId = getLinkId(hop.from, hop.to);
+            if (cycleLinks.has(linkId)) {
+              canSchedule = false;
+              break;
+            }
+          }
+
+          if (canSchedule) {
+            for (const hop of path) {
+              const linkId = getLinkId(hop.from, hop.to);
+              cycleLinks.add(linkId);
+            }
+            cyclePackets.push({ packet, cycle });
+            unscheduled.splice(i, 1);
+          }
+        }
+
+        scheduled.push(...cyclePackets);
+        cycle++;
+      }
+
+      return scheduled;
+    };
+
+    const scheduledPackets = schedulePackets();
+    let maxCycle = 0;
+    let maxDistance = 0;
+
+    scheduledPackets.forEach(({ packet, cycle }) => {
+      maxCycle = Math.max(maxCycle, cycle);
+      const distance =
+        Math.abs(packet.toRow - packet.fromRow) +
+        Math.abs(packet.toCol - packet.fromCol);
+      maxDistance = Math.max(maxDistance, distance);
+
+      setTimeout(() => {
+        const sourcePE = this.getPE(packet.fromRow, packet.fromCol);
+        const targetPE = this.getPE(packet.toRow, packet.toCol);
+
+        if (sourcePE) sourcePE.activate();
+        if (targetPE) {
+          setTimeout(() => {
+            targetPE.activate();
+          }, hopDelay * distance);
+        }
+
+        this.packets.push(
+          new MultiHopPacket(
+            packet.fromRow,
+            packet.fromCol,
+            packet.toRow,
+            packet.toCol,
+            Date.now(),
+            hopDelay,
+          ),
+        );
+      }, cycle * hopDelay);
+    });
+
+    if (onComplete) {
+      const totalDuration = (maxCycle + maxDistance) * hopDelay + 200;
+      setTimeout(onComplete, totalDuration);
+    }
+  }
+
+  run2DFFT(speedMultiplier, onStep) {
+    const rowStages = Math.log2(this.cols);
+    const colStages = Math.log2(this.rows);
+
+    let currentRowStage = 1;
+    let currentColStage = 1;
+
+    const runNextRowStage = () => {
+      if (currentRowStage <= rowStages) {
+        if (onStep) {
+          onStep("row", currentRowStage, {
+            name: `Row FFT Stage ${currentRowStage}`,
+            line: currentRowStage + 1,
+          });
+        }
+        this.fftRowStage(currentRowStage, speedMultiplier, () => {
+          currentRowStage++;
+          runNextRowStage();
+        });
+      } else {
+        runTranspose1();
+      }
+    };
+
+    const runTranspose1 = () => {
+      if (onStep) {
+        onStep("transpose", 0, {
+          name: "Transpose: X = Xᵀ",
+          line: 7,
+        });
+      }
+      this.transposeMatrix(speedMultiplier, () => {
+        currentColStage = 1;
+        runNextColStage();
+      });
+    };
+
+    const runNextColStage = () => {
+      if (currentColStage <= colStages) {
+        if (onStep) {
+          onStep("col", currentColStage, {
+            name: `Column FFT Stage ${currentColStage}`,
+            line: currentColStage + 8,
+          });
+        }
+        this.fftColumnStage(currentColStage, speedMultiplier, () => {
+          currentColStage++;
+          runNextColStage();
+        });
+      } else {
+        runTranspose2();
+      }
+    };
+
+    const runTranspose2 = () => {
+      if (onStep) {
+        onStep("transpose", 0, {
+          name: "Transpose: X = Xᵀ",
+          line: 14,
+        });
+      }
+      this.transposeMatrix(speedMultiplier, () => {});
+    };
+
+    runNextRowStage();
+  }
 }

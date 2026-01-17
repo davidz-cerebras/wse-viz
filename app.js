@@ -1,8 +1,8 @@
 import { Grid } from "./grid.js";
 import { AnimationLoop } from "./animation.js";
 
-const GRID_ROWS = 20;
-const GRID_COLS = 30;
+const GRID_ROWS = 32;
+const GRID_COLS = 32;
 const CELL_SIZE = 20;
 const GAP = 4;
 
@@ -98,6 +98,7 @@ function setupEventListeners() {
     .addEventListener("click", startAllReduceFull);
   document.getElementById("spmvBtn").addEventListener("click", startSpMV);
   document.getElementById("cgBtn").addEventListener("click", startCG);
+  document.getElementById("fftBtn").addEventListener("click", startFFT);
 
   const speedSlider = document.getElementById("speedSlider");
   const speedValue = document.getElementById("speedValue");
@@ -126,13 +127,20 @@ function startCG() {
   grid.conjugateGradient(5, speedMultiplier, updateCodePanel);
 }
 
+function startFFT() {
+  stopSimulation();
+  animationLoop.start();
+  clearCodeHighlight();
+  grid.run2DFFT(speedMultiplier, updateCodePanel);
+}
+
 function clearCodeHighlight() {
   document.querySelectorAll(".code-line").forEach((line) => {
     line.classList.remove("active");
   });
 }
 
-function updateCodePanel(iteration, stepIndex, step) {
+function updateCodePanel(phase, stage, step) {
   clearCodeHighlight();
 
   const lineNumber = step.line;
@@ -146,16 +154,18 @@ function updateCodePanel(iteration, stepIndex, step) {
   const stepValue = document.getElementById("stepValue");
   const operationValue = document.getElementById("operationValue");
 
-  if (iteration === "init") {
-    iterationValue.textContent = "Init";
+  if (phase === "row") {
+    iterationValue.textContent = "Row FFT";
+    stepValue.textContent = `${stage}/5`;
+  } else if (phase === "col") {
+    iterationValue.textContent = "Column FFT";
+    stepValue.textContent = `${stage}/5`;
+  } else if (phase === "transpose") {
+    iterationValue.textContent = "Transpose";
     stepValue.textContent = "-";
-    const initLines = document.querySelectorAll(
-      '.code-line[data-line="1"], .code-line[data-line="2"]',
-    );
-    initLines.forEach((l) => l.classList.add("active"));
   } else {
-    iterationValue.textContent = `${iteration + 1}/5`;
-    stepValue.textContent = `${stepIndex + 1}/7`;
+    iterationValue.textContent = `${phase + 1}/5`;
+    stepValue.textContent = `${stage + 1}/7`;
   }
 
   operationValue.textContent = step.name;
