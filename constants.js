@@ -14,6 +14,9 @@ export const PACKET_RADIUS = 4;
 export const PACKET_COLOR = "rgb(255, 193, 7)";
 export const PACKET_HALO_COLOR = "rgba(255, 193, 7, 0.5)";
 
+// Trace replay timing
+export const MS_PER_CYCLE = 5;
+
 // PE timing
 export const PE_ON_DURATION = 200;
 export const PE_BRIGHTEN_DURATION = 25;

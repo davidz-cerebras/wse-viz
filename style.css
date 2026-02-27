@@ -74,6 +74,58 @@ header h1 {
   background: linear-gradient(135deg, #5cb860, #4caf50);
 }
 
+.controls-separator {
+  color: #5c6b8a;
+  margin: 0 0.25rem;
+}
+
+.file-input-label {
+  padding: 0.5rem 1.5rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: linear-gradient(135deg, #ff9800, #f57c00);
+  color: #ffffff;
+  display: inline-block;
+}
+
+.file-input-label:hover {
+  background: linear-gradient(135deg, #ffa726, #ff9800);
+  transform: translateY(-1px);
+}
+
+#replayTraceBtn {
+  background: linear-gradient(135deg, #00bcd4, #0097a7);
+}
+
+#replayTraceBtn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #26c6da, #00bcd4);
+}
+
+#replayTraceBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.trace-status {
+  font-size: 0.8rem;
+  color: #90a4ae;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cycle-display {
+  font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
+  font-size: 0.85rem;
+  color: #64b5f6;
+  min-width: 120px;
+}
+
 #cgBtn {
   background: linear-gradient(135deg, #9c27b0, #7b1fa2);
 }
@@ -102,6 +154,7 @@ canvas {
   border-radius: 8px;
   background: #0a0e27;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+
 }
 
 .code-panel {

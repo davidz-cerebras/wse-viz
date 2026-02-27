@@ -1,24 +1,22 @@
 import { Grid } from "./grid.js";
 import { AnimationLoop } from "./animation.js";
-import { GRID_ROWS, GRID_COLS, CELL_SIZE, GAP } from "./constants.js";
+import { TraceParser } from "./trace-parser.js";
+import { GRID_ROWS, GRID_COLS, CELL_SIZE, GAP, MS_PER_CYCLE } from "./constants.js";
 
 let grid;
 let animationLoop;
 let canvas;
 let ctx;
 let simulationInterval;
+let traceData = null;
+let replayTimeouts = [];
+let isReplaying = false;
 
 function init() {
   canvas = document.getElementById("wseCanvas");
   ctx = canvas.getContext("2d");
 
-  const totalWidth = GRID_COLS * (CELL_SIZE + GAP) + GAP;
-  const totalHeight = GRID_ROWS * (CELL_SIZE + GAP) + GAP;
-
-  canvas.width = totalWidth;
-  canvas.height = totalHeight;
-
-  grid = new Grid(GRID_ROWS, GRID_COLS, CELL_SIZE, GAP);
+  setGrid(GRID_ROWS, GRID_COLS);
 
   animationLoop = new AnimationLoop(update, draw);
 
@@ -67,6 +65,7 @@ function startSimulation() {
 }
 
 function stopSimulation() {
+  cancelReplay();
   if (simulationInterval) {
     clearInterval(simulationInterval);
     simulationInterval = null;
@@ -83,6 +82,12 @@ function setupEventListeners() {
     .addEventListener("click", startAllReduceFull);
   document.getElementById("spmvBtn").addEventListener("click", startSpMV);
   document.getElementById("cgBtn").addEventListener("click", startCG);
+  document
+    .getElementById("traceFileInput")
+    .addEventListener("change", handleTraceFile);
+  document
+    .getElementById("replayTraceBtn")
+    .addEventListener("click", replayTrace);
 }
 
 function startAllReduceFull() {
@@ -128,6 +133,93 @@ function updateCodePanel(phase, stage, step) {
   stepValue.textContent = `${stage + 1}/7`;
 
   operationValue.textContent = step.name;
+}
+
+const DEFAULT_DISPLAY_SIZE = GRID_COLS * (CELL_SIZE + GAP) + GAP;
+
+function setGrid(rows, cols) {
+  grid = new Grid(rows, cols, CELL_SIZE, GAP);
+  const naturalWidth = cols * (CELL_SIZE + GAP) + GAP;
+  const naturalHeight = rows * (CELL_SIZE + GAP) + GAP;
+  const scale = DEFAULT_DISPLAY_SIZE / Math.max(naturalWidth, naturalHeight);
+  canvas.width = Math.round(naturalWidth * scale);
+  canvas.height = Math.round(naturalHeight * scale);
+  canvas.style.width = "";
+  canvas.style.height = "";
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+}
+
+async function handleTraceFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const statusEl = document.getElementById("traceStatus");
+  statusEl.textContent = "Parsing...";
+
+  const text = await file.text();
+  traceData = TraceParser.parse(text);
+
+  statusEl.textContent =
+    `${traceData.dimX}x${traceData.dimY} grid, ` +
+    `${traceData.totalEvents} events, ` +
+    `cycles ${traceData.minCycle}\u2013${traceData.maxCycle}`;
+
+  setGrid(traceData.dimY, traceData.dimX);
+  document.getElementById("replayTraceBtn").disabled = false;
+}
+
+function replayTrace() {
+  if (!traceData || isReplaying) return;
+
+  stopSimulation();
+  isReplaying = true;
+  animationLoop.start();
+
+  setGrid(traceData.dimY, traceData.dimX);
+
+  const { eventsByCycle, minCycle, maxCycle } = traceData;
+  const cycleDisplay = document.getElementById("cycleDisplay");
+  const activeCycles = Array.from(eventsByCycle.keys()).sort((a, b) => a - b);
+
+  for (const cycle of activeCycles) {
+    const delayMs = (cycle - minCycle) * MS_PER_CYCLE;
+    const events = eventsByCycle.get(cycle);
+
+    const timeoutId = setTimeout(() => {
+      cycleDisplay.textContent = `Cycle ${cycle} / ${maxCycle}`;
+
+      for (const evt of events) {
+        const dest = TraceParser.toGridCoords(evt.x, evt.y, traceData.dimY);
+        grid.activatePE(dest.row, dest.col);
+
+        if (evt.dir !== "R") {
+          const src = TraceParser.sourceCoords(evt.x, evt.y, evt.dir);
+          if (src) {
+            const srcGrid = TraceParser.toGridCoords(src.x, src.y, traceData.dimY);
+            grid.sendPacket(srcGrid.row, srcGrid.col, dest.row, dest.col);
+          }
+        }
+      }
+    }, delayMs);
+
+    replayTimeouts.push(timeoutId);
+  }
+
+  const totalDuration = (maxCycle - minCycle) * MS_PER_CYCLE + 500;
+  const endTimeout = setTimeout(() => {
+    isReplaying = false;
+    cycleDisplay.textContent = `Done (${traceData.totalEvents} events)`;
+  }, totalDuration);
+  replayTimeouts.push(endTimeout);
+}
+
+function cancelReplay() {
+  for (const id of replayTimeouts) {
+    clearTimeout(id);
+  }
+  replayTimeouts = [];
+  isReplaying = false;
+  document.getElementById("cycleDisplay").textContent = "";
 }
 
 document.addEventListener("DOMContentLoaded", init);

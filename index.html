@@ -15,6 +15,14 @@
           <button id="allReduceFullBtn">AllReduce</button>
           <button id="spmvBtn">SpMV</button>
           <button id="cgBtn">Conjugate Gradient</button>
+          <span class="controls-separator">|</span>
+          <label class="file-input-label" for="traceFileInput">
+            Load Trace
+            <input type="file" id="traceFileInput" accept=".log" hidden />
+          </label>
+          <button id="replayTraceBtn" disabled>Replay Trace</button>
+          <span id="traceStatus" class="trace-status"></span>
+          <span id="cycleDisplay" class="cycle-display"></span>
         </div>
       </header>
       <main>
