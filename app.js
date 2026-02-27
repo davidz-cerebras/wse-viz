@@ -156,8 +156,7 @@ async function handleTraceFile(event) {
   const statusEl = document.getElementById("traceStatus");
   statusEl.textContent = "Parsing...";
 
-  const text = await file.text();
-  traceData = TraceParser.parse(text);
+  traceData = await TraceParser.parse(file);
 
   statusEl.textContent =
     `${traceData.dimX}x${traceData.dimY} grid, ` +

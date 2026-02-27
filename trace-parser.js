@@ -1,5 +1,5 @@
 export class TraceParser {
-  static parse(logText) {
+  static async parse(file) {
     let dimX = 0;
     let dimY = 0;
     const eventsByCycle = new Map();
@@ -11,36 +11,50 @@ export class TraceParser {
     const landingRegex =
       /^@(\d+) P(\d+)\.(\d+) \(\w+\) landing C(\d+) from link ([WESNR]),/;
 
-    const lines = logText.split("\n");
-    for (const line of lines) {
-      if (dimX === 0) {
-        const dimMatch = line.match(dimRegex);
-        if (dimMatch) {
-          dimX = parseInt(dimMatch[1]);
-          dimY = parseInt(dimMatch[2]);
-          continue;
+    const reader = file
+      .stream()
+      .pipeThrough(new TextDecoderStream())
+      .getReader();
+    let partial = "";
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      partial += value;
+      const lines = partial.split("\n");
+      partial = lines.pop();
+
+      for (const line of lines) {
+        if (dimX === 0) {
+          const dimMatch = line.match(dimRegex);
+          if (dimMatch) {
+            dimX = parseInt(dimMatch[1]);
+            dimY = parseInt(dimMatch[2]);
+            continue;
+          }
         }
+
+        if (!line.includes(") landing C")) continue;
+
+        const m = line.match(landingRegex);
+        if (!m) continue;
+
+        const cycle = parseInt(m[1]);
+        const x = parseInt(m[2]);
+        const y = parseInt(m[3]);
+        const color = parseInt(m[4]);
+        const dir = m[5];
+
+        if (!eventsByCycle.has(cycle)) {
+          eventsByCycle.set(cycle, []);
+        }
+        eventsByCycle.get(cycle).push({ cycle, x, y, color, dir });
+
+        if (cycle < minCycle) minCycle = cycle;
+        if (cycle > maxCycle) maxCycle = cycle;
+        totalEvents++;
       }
-
-      if (!line.includes(") landing C")) continue;
-
-      const m = line.match(landingRegex);
-      if (!m) continue;
-
-      const cycle = parseInt(m[1]);
-      const x = parseInt(m[2]);
-      const y = parseInt(m[3]);
-      const color = parseInt(m[4]);
-      const dir = m[5];
-
-      if (!eventsByCycle.has(cycle)) {
-        eventsByCycle.set(cycle, []);
-      }
-      eventsByCycle.get(cycle).push({ cycle, x, y, color, dir });
-
-      if (cycle < minCycle) minCycle = cycle;
-      if (cycle > maxCycle) maxCycle = cycle;
-      totalEvents++;
     }
 
     return { dimX, dimY, eventsByCycle, minCycle, maxCycle, totalEvents };
