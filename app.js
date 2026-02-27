@@ -1,17 +1,12 @@
 import { Grid } from "./grid.js";
 import { AnimationLoop } from "./animation.js";
-
-const GRID_ROWS = 32;
-const GRID_COLS = 32;
-const CELL_SIZE = 20;
-const GAP = 4;
+import { GRID_ROWS, GRID_COLS, CELL_SIZE, GAP } from "./constants.js";
 
 let grid;
 let animationLoop;
 let canvas;
 let ctx;
 let simulationInterval;
-let speedMultiplier = 4;
 
 function init() {
   canvas = document.getElementById("wseCanvas");
@@ -28,25 +23,15 @@ function init() {
   animationLoop = new AnimationLoop(update, draw);
 
   setupEventListeners();
-  updateStats();
 }
 
 function update() {
   grid.update();
-  updateStats();
 }
 
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   grid.draw(ctx);
-}
-
-function updateStats() {
-  document.getElementById("peCount").textContent = `PEs: ${grid.pes.length}`;
-  document.getElementById("activePEs").textContent =
-    `Active: ${grid.getActivePECount()}`;
-  document.getElementById("dataTransfers").textContent =
-    `Transfers: ${grid.getPacketCount()}`;
 }
 
 function startSimulation() {
@@ -98,40 +83,25 @@ function setupEventListeners() {
     .addEventListener("click", startAllReduceFull);
   document.getElementById("spmvBtn").addEventListener("click", startSpMV);
   document.getElementById("cgBtn").addEventListener("click", startCG);
-  document.getElementById("fftBtn").addEventListener("click", startFFT);
-
-  const speedSlider = document.getElementById("speedSlider");
-  const speedValue = document.getElementById("speedValue");
-  speedSlider.addEventListener("input", (e) => {
-    speedMultiplier = parseFloat(e.target.value);
-    speedValue.textContent = `${speedMultiplier}x`;
-  });
 }
 
 function startAllReduceFull() {
   stopSimulation();
   animationLoop.start();
-  grid.runAllReduce(speedMultiplier);
+  grid.runAllReduce();
 }
 
 function startSpMV() {
   stopSimulation();
   animationLoop.start();
-  grid.spmvPattern(speedMultiplier);
+  grid.spmvPattern();
 }
 
 function startCG() {
   stopSimulation();
   animationLoop.start();
   clearCodeHighlight();
-  grid.conjugateGradient(5, speedMultiplier, updateCodePanel);
-}
-
-function startFFT() {
-  stopSimulation();
-  animationLoop.start();
-  clearCodeHighlight();
-  grid.run2DFFT(speedMultiplier, updateCodePanel);
+  grid.conjugateGradient(5, updateCodePanel);
 }
 
 function clearCodeHighlight() {
@@ -154,19 +124,8 @@ function updateCodePanel(phase, stage, step) {
   const stepValue = document.getElementById("stepValue");
   const operationValue = document.getElementById("operationValue");
 
-  if (phase === "row") {
-    iterationValue.textContent = "Row FFT";
-    stepValue.textContent = `${stage}/5`;
-  } else if (phase === "col") {
-    iterationValue.textContent = "Column FFT";
-    stepValue.textContent = `${stage}/5`;
-  } else if (phase === "transpose") {
-    iterationValue.textContent = "Transpose";
-    stepValue.textContent = "-";
-  } else {
-    iterationValue.textContent = `${phase + 1}/5`;
-    stepValue.textContent = `${stage + 1}/7`;
-  }
+  iterationValue.textContent = `${phase + 1}/5`;
+  stepValue.textContent = `${stage + 1}/7`;
 
   operationValue.textContent = step.name;
 }

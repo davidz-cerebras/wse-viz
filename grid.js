@@ -1,6 +1,7 @@
 import { PE } from "./pe.js";
 import { DataPacket } from "./packet.js";
 import { MultiHopPacket } from "./multihop-packet.js";
+import { FADE_IN, FADE_OUT, HOP_DELAY } from "./constants.js";
 
 export class Grid {
   constructor(rows, cols, cellSize, gap) {
@@ -39,7 +40,7 @@ export class Grid {
     }
   }
 
-  sendPacket(fromRow, fromCol, toRow, toCol, duration = 600) {
+  sendPacket(fromRow, fromCol, toRow, toCol) {
     const fromPE = this.getPE(fromRow, fromCol);
     const toPE = this.getPE(toRow, toCol);
 
@@ -53,7 +54,7 @@ export class Grid {
     const toY = toPE.y + this.cellSize / 2;
 
     this.packets.push(
-      new DataPacket(fromX, fromY, toX, toY, Date.now(), duration),
+      new DataPacket(fromX, fromY, toX, toY, Date.now()),
     );
   }
 
@@ -73,68 +74,6 @@ export class Grid {
         packet.draw(ctx, Date.now());
       }
     });
-  }
-
-  getActivePECount() {
-    return this.pes.filter((pe) => pe.active).length;
-  }
-
-  getPacketCount() {
-    return this.packets.length;
-  }
-
-  allReducePhase1() {
-    const isEvenCols = this.cols % 2 === 0;
-    const centerCol1 = Math.floor((this.cols - 1) / 2);
-    const centerCol2 = isEvenCols ? centerCol1 + 1 : centerCol1;
-
-    for (let row = 0; row < this.rows; row++) {
-      for (let col = 0; col < this.cols; col++) {
-        const pe = this.getPE(row, col);
-        pe.activate();
-
-        if (col === centerCol1 || col === centerCol2) continue;
-
-        let nextCol;
-        if (col < centerCol1) {
-          nextCol = col + 1;
-        } else if (col > centerCol2) {
-          nextCol = col - 1;
-        } else {
-          nextCol = col < centerCol2 ? centerCol1 : centerCol2;
-        }
-
-        this.sendPacket(row, col, row, nextCol, 600);
-      }
-    }
-  }
-
-  allReducePhase2() {
-    const isEvenCols = this.cols % 2 === 0;
-    const centerCol1 = Math.floor((this.cols - 1) / 2);
-    const centerCol2 = isEvenCols ? centerCol1 + 1 : centerCol1;
-
-    for (let row = 0; row < this.rows; row++) {
-      for (let col = 0; col < this.cols; col++) {
-        if (col === 0 || col === this.cols - 1) continue;
-
-        const pe = this.getPE(row, col);
-        pe.activate();
-
-        if (col === centerCol1 || col === centerCol2) continue;
-
-        let nextCol;
-        if (col < centerCol1) {
-          nextCol = col + 1;
-        } else if (col > centerCol2) {
-          nextCol = col - 1;
-        } else {
-          nextCol = col < centerCol2 ? centerCol1 : centerCol2;
-        }
-
-        this.sendPacket(row, col, row, nextCol, 600);
-      }
-    }
   }
 
   allReducePhase(phase) {
@@ -161,54 +100,45 @@ export class Grid {
           nextCol = col < centerCol2 ? centerCol1 : centerCol2;
         }
 
-        this.sendPacket(row, col, row, nextCol, 600);
+        this.sendPacket(row, col, row, nextCol);
       }
     }
   }
 
-  runAllReduce(speedMultiplier = 1, onComplete) {
+  runAllReduce(onComplete) {
+    const packetDuration = FADE_IN + HOP_DELAY + FADE_OUT;
     const maxPhase = Math.ceil(this.cols / 2);
-    const phaseDelay = 450 / speedMultiplier;
-
-    for (let phase = 1; phase <= maxPhase; phase++) {
-      setTimeout(
-        () => {
-          this.allReducePhase(phase);
-        },
-        (phase - 1) * phaseDelay,
-      );
-    }
-
-    const verticalStartDelay = maxPhase * phaseDelay;
     const maxVerticalPhase = Math.ceil(this.rows / 2);
-
-    for (let phase = 1; phase <= maxVerticalPhase; phase++) {
-      setTimeout(
-        () => {
-          this.allReduceVerticalPhase(phase);
-        },
-        verticalStartDelay + (phase - 1) * phaseDelay,
-      );
-    }
-
-    const circularStartDelay =
-      verticalStartDelay + maxVerticalPhase * phaseDelay;
     const circularIterations = 3;
 
-    for (let i = 0; i < circularIterations; i++) {
-      setTimeout(
-        () => {
-          this.circularExchange();
-        },
-        circularStartDelay + i * phaseDelay,
-      );
-    }
+    const runHorizontalPhase = (phase) => {
+      if (phase > maxPhase) {
+        runVerticalPhase(1);
+        return;
+      }
+      this.allReducePhase(phase);
+      setTimeout(() => runHorizontalPhase(phase + 1), packetDuration);
+    };
 
-    const broadcastStartDelay =
-      circularStartDelay + circularIterations * phaseDelay;
-    setTimeout(() => {
-      this.broadcast(speedMultiplier, onComplete);
-    }, broadcastStartDelay);
+    const runVerticalPhase = (phase) => {
+      if (phase > maxVerticalPhase) {
+        runCircular(0);
+        return;
+      }
+      this.allReduceVerticalPhase(phase);
+      setTimeout(() => runVerticalPhase(phase + 1), packetDuration);
+    };
+
+    const runCircular = (i) => {
+      if (i >= circularIterations) {
+        this.broadcast(onComplete);
+        return;
+      }
+      this.circularExchange();
+      setTimeout(() => runCircular(i + 1), packetDuration);
+    };
+
+    runHorizontalPhase(1);
   }
 
   allReduceVerticalPhase(phase) {
@@ -238,7 +168,7 @@ export class Grid {
           nextRow = row < centerRow2 ? centerRow1 : centerRow2;
         }
 
-        this.sendPacket(row, col, nextRow, col, 600);
+        this.sendPacket(row, col, nextRow, col);
       }
     }
   }
@@ -261,13 +191,13 @@ export class Grid {
     if (bottomRight) bottomRight.activate();
     if (bottomLeft) bottomLeft.activate();
 
-    this.sendPacket(centerRow1, centerCol1, centerRow2, centerCol1, 600);
-    this.sendPacket(centerRow2, centerCol1, centerRow2, centerCol2, 600);
-    this.sendPacket(centerRow2, centerCol2, centerRow1, centerCol2, 600);
-    this.sendPacket(centerRow1, centerCol2, centerRow1, centerCol1, 600);
+    this.sendPacket(centerRow1, centerCol1, centerRow2, centerCol1);
+    this.sendPacket(centerRow2, centerCol1, centerRow2, centerCol2);
+    this.sendPacket(centerRow2, centerCol2, centerRow1, centerCol2);
+    this.sendPacket(centerRow1, centerCol2, centerRow1, centerCol1);
   }
 
-  broadcast(speedMultiplier = 1, onComplete) {
+  broadcast(onComplete) {
     const isEvenCols = this.cols % 2 === 0;
     const centerCol1 = Math.floor((this.cols - 1) / 2);
     const centerCol2 = isEvenCols ? centerCol1 + 1 : centerCol1;
@@ -283,7 +213,7 @@ export class Grid {
         const pe = this.getPE(row, col);
         if (pe) {
           pe.activate();
-          queue.push({ row, col, isCenter: true, isCenterCol: true });
+          queue.push({ row, col, isCenterCol: true });
           visited.add(`${row},${col}`);
         }
       }
@@ -296,27 +226,27 @@ export class Grid {
       }
 
       const nextQueue = [];
-      const delay = 450 / speedMultiplier;
+      const delay = FADE_IN + HOP_DELAY + FADE_OUT;
 
       for (const item of queue) {
-        const { row, col, isCenter, isCenterCol } = item;
+        const { row, col, isCenterCol } = item;
         const pe = this.getPE(row, col);
         if (!pe) continue;
 
-        if (isCenter || isCenterCol) {
+        if (isCenterCol) {
           const up = this.getPE(row - 1, col);
           const down = this.getPE(row + 1, col);
 
           if (up && !visited.has(`${row - 1},${col}`)) {
             up.activate();
-            this.sendPacket(row, col, row - 1, col, 600);
+            this.sendPacket(row, col, row - 1, col);
             visited.add(`${row - 1},${col}`);
             nextQueue.push({ row: row - 1, col, isCenterCol: true });
           }
 
           if (down && !visited.has(`${row + 1},${col}`)) {
             down.activate();
-            this.sendPacket(row, col, row + 1, col, 600);
+            this.sendPacket(row, col, row + 1, col);
             visited.add(`${row + 1},${col}`);
             nextQueue.push({ row: row + 1, col, isCenterCol: true });
           }
@@ -327,14 +257,14 @@ export class Grid {
 
         if (left && !visited.has(`${row},${col - 1}`)) {
           left.activate();
-          this.sendPacket(row, col, row, col - 1, 600);
+          this.sendPacket(row, col, row, col - 1);
           visited.add(`${row},${col - 1}`);
           nextQueue.push({ row, col: col - 1 });
         }
 
         if (right && !visited.has(`${row},${col + 1}`)) {
           right.activate();
-          this.sendPacket(row, col, row, col + 1, 600);
+          this.sendPacket(row, col, row, col + 1);
           visited.add(`${row},${col + 1}`);
           nextQueue.push({ row, col: col + 1 });
         }
@@ -353,8 +283,8 @@ export class Grid {
     broadcastStep(0);
   }
 
-  spmvPattern(speedMultiplier = 1, onComplete) {
-    const hopDelay = 300 / speedMultiplier;
+  spmvPattern(onComplete) {
+    const scheduleDelay = HOP_DELAY;
     const packetQueue = [];
 
     for (let row = 0; row < this.rows; row++) {
@@ -494,7 +424,7 @@ export class Grid {
         if (targetPE) {
           setTimeout(() => {
             targetPE.activate();
-          }, hopDelay * distance);
+          }, FADE_IN + HOP_DELAY * distance);
 
           this.packets.push(
             new MultiHopPacket(
@@ -503,29 +433,31 @@ export class Grid {
               packet.toRow,
               packet.toCol,
               Date.now(),
-              hopDelay,
             ),
           );
         }
-      }, cycle * hopDelay);
+      }, cycle * scheduleDelay);
     });
 
     if (onComplete) {
-      const totalDuration = (maxCycle + maxDistance) * hopDelay + 200;
+      const lastPacketAnimation = FADE_IN + maxDistance * HOP_DELAY + FADE_OUT;
+      const totalDuration = maxCycle * scheduleDelay + lastPacketAnimation;
       setTimeout(onComplete, totalDuration);
     }
   }
 
-  conjugateGradient(iterations = 5, speedMultiplier = 1, onStep) {
+  conjugateGradient(iterations = 5, onStep) {
+    const packetDuration = FADE_IN + HOP_DELAY + FADE_OUT;
+
     const runStep = (step, stepIndex, iter, callback) => {
       if (onStep) {
         onStep(iter, stepIndex, step);
       }
 
       if (step.type === "spmv") {
-        this.spmvPattern(speedMultiplier, callback);
+        this.spmvPattern(callback);
       } else if (step.type === "dot") {
-        this.runAllReduce(speedMultiplier * 2, callback);
+        this.runAllReduce(callback);
       } else if (step.type === "axpy") {
         for (let row = 0; row < this.rows; row++) {
           for (let col = 0; col < this.cols; col++) {
@@ -535,9 +467,9 @@ export class Grid {
             }
           }
         }
-        setTimeout(callback, 600 / speedMultiplier);
+        setTimeout(callback, packetDuration);
       } else if (step.type === "check") {
-        setTimeout(callback, 400 / speedMultiplier);
+        setTimeout(callback, packetDuration);
       }
     };
 
@@ -596,257 +528,7 @@ export class Grid {
         }
       };
 
-      setTimeout(runNextIteration, 800 / speedMultiplier);
+      setTimeout(runNextIteration, packetDuration);
     }, 0);
-  }
-
-  fftRowStage(stage, speedMultiplier, onComplete) {
-    const distance = Math.pow(2, stage - 1);
-    const delay = 600 / speedMultiplier;
-
-    for (let row = 0; row < this.rows; row++) {
-      for (let col = 0; col < this.cols; col++) {
-        const partnerCol = col ^ distance;
-
-        if (partnerCol > col && partnerCol < this.cols) {
-          this.activatePE(row, col);
-          this.activatePE(row, partnerCol);
-
-          this.sendPacket(row, col, row, partnerCol, delay);
-          this.sendPacket(row, partnerCol, row, col, delay);
-        }
-      }
-    }
-
-    if (onComplete) {
-      setTimeout(onComplete, delay + 100);
-    }
-  }
-
-  fftColumnStage(stage, speedMultiplier, onComplete) {
-    const distance = Math.pow(2, stage - 1);
-    const delay = 600 / speedMultiplier;
-
-    for (let col = 0; col < this.cols; col++) {
-      for (let row = 0; row < this.rows; row++) {
-        const partnerRow = row ^ distance;
-
-        if (partnerRow > row && partnerRow < this.rows) {
-          this.activatePE(row, col);
-          this.activatePE(partnerRow, col);
-
-          this.sendPacket(row, col, partnerRow, col, delay);
-          this.sendPacket(partnerRow, col, row, col, delay);
-        }
-      }
-    }
-
-    if (onComplete) {
-      setTimeout(onComplete, delay + 100);
-    }
-  }
-
-  transposeMatrix(speedMultiplier, onComplete) {
-    const hopDelay = 300 / speedMultiplier;
-    const packetQueue = [];
-
-    for (let row = 0; row < this.rows; row++) {
-      for (let col = row + 1; col < this.cols; col++) {
-        packetQueue.push({
-          fromRow: row,
-          fromCol: col,
-          toRow: col,
-          toCol: row,
-        });
-      }
-    }
-
-    const getPacketPath = (packet) => {
-      const path = [];
-      let currentRow = packet.fromRow;
-      let currentCol = packet.fromCol;
-
-      const horizontalDirection = packet.toCol > packet.fromCol ? 1 : -1;
-      const verticalDirection = packet.toRow > packet.fromRow ? 1 : -1;
-
-      const horizontalSteps = Math.abs(packet.toCol - packet.fromCol);
-      const verticalSteps = Math.abs(packet.toRow - packet.fromRow);
-
-      for (let i = 0; i < horizontalSteps; i++) {
-        const nextCol = currentCol + horizontalDirection;
-        path.push({
-          from: { row: currentRow, col: currentCol },
-          to: { row: currentRow, col: nextCol },
-        });
-        currentCol = nextCol;
-      }
-
-      for (let i = 0; i < verticalSteps; i++) {
-        const nextRow = currentRow + verticalDirection;
-        path.push({
-          from: { row: currentRow, col: currentCol },
-          to: { row: nextRow, col: currentCol },
-        });
-        currentRow = nextRow;
-      }
-
-      return path;
-    };
-
-    const getLinkId = (from, to) => {
-      if (from.row === to.row) {
-        const minCol = Math.min(from.col, to.col);
-        return `h-${from.row}-${minCol}`;
-      } else {
-        const minRow = Math.min(from.row, to.row);
-        return `v-${minRow}-${from.col}`;
-      }
-    };
-
-    const schedulePackets = () => {
-      const scheduled = [];
-      const unscheduled = [...packetQueue];
-      let cycle = 0;
-
-      while (unscheduled.length > 0) {
-        const cycleLinks = new Set();
-        const cyclePackets = [];
-
-        for (let i = unscheduled.length - 1; i >= 0; i--) {
-          const packet = unscheduled[i];
-          const path = getPacketPath(packet);
-          let canSchedule = true;
-
-          for (const hop of path) {
-            const linkId = getLinkId(hop.from, hop.to);
-            if (cycleLinks.has(linkId)) {
-              canSchedule = false;
-              break;
-            }
-          }
-
-          if (canSchedule) {
-            for (const hop of path) {
-              const linkId = getLinkId(hop.from, hop.to);
-              cycleLinks.add(linkId);
-            }
-            cyclePackets.push({ packet, cycle });
-            unscheduled.splice(i, 1);
-          }
-        }
-
-        scheduled.push(...cyclePackets);
-        cycle++;
-      }
-
-      return scheduled;
-    };
-
-    const scheduledPackets = schedulePackets();
-    let maxCycle = 0;
-    let maxDistance = 0;
-
-    scheduledPackets.forEach(({ packet, cycle }) => {
-      maxCycle = Math.max(maxCycle, cycle);
-      const distance =
-        Math.abs(packet.toRow - packet.fromRow) +
-        Math.abs(packet.toCol - packet.fromCol);
-      maxDistance = Math.max(maxDistance, distance);
-
-      setTimeout(() => {
-        const sourcePE = this.getPE(packet.fromRow, packet.fromCol);
-        const targetPE = this.getPE(packet.toRow, packet.toCol);
-
-        if (sourcePE) sourcePE.activate();
-        if (targetPE) {
-          setTimeout(() => {
-            targetPE.activate();
-          }, hopDelay * distance);
-        }
-
-        this.packets.push(
-          new MultiHopPacket(
-            packet.fromRow,
-            packet.fromCol,
-            packet.toRow,
-            packet.toCol,
-            Date.now(),
-            hopDelay,
-          ),
-        );
-      }, cycle * hopDelay);
-    });
-
-    if (onComplete) {
-      const totalDuration = (maxCycle + maxDistance) * hopDelay + 200;
-      setTimeout(onComplete, totalDuration);
-    }
-  }
-
-  run2DFFT(speedMultiplier, onStep) {
-    const rowStages = Math.log2(this.cols);
-    const colStages = Math.log2(this.rows);
-
-    let currentRowStage = 1;
-    let currentColStage = 1;
-
-    const runNextRowStage = () => {
-      if (currentRowStage <= rowStages) {
-        if (onStep) {
-          onStep("row", currentRowStage, {
-            name: `Row FFT Stage ${currentRowStage}`,
-            line: currentRowStage + 1,
-          });
-        }
-        this.fftRowStage(currentRowStage, speedMultiplier, () => {
-          currentRowStage++;
-          runNextRowStage();
-        });
-      } else {
-        runTranspose1();
-      }
-    };
-
-    const runTranspose1 = () => {
-      if (onStep) {
-        onStep("transpose", 0, {
-          name: "Transpose: X = Xᵀ",
-          line: 7,
-        });
-      }
-      this.transposeMatrix(speedMultiplier, () => {
-        currentColStage = 1;
-        runNextColStage();
-      });
-    };
-
-    const runNextColStage = () => {
-      if (currentColStage <= colStages) {
-        if (onStep) {
-          onStep("col", currentColStage, {
-            name: `Column FFT Stage ${currentColStage}`,
-            line: currentColStage + 8,
-          });
-        }
-        this.fftColumnStage(currentColStage, speedMultiplier, () => {
-          currentColStage++;
-          runNextColStage();
-        });
-      } else {
-        runTranspose2();
-      }
-    };
-
-    const runTranspose2 = () => {
-      if (onStep) {
-        onStep("transpose", 0, {
-          name: "Transpose: X = Xᵀ",
-          line: 14,
-        });
-      }
-      this.transposeMatrix(speedMultiplier, () => {});
-    };
-
-    runNextRowStage();
   }
 }

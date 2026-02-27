@@ -45,31 +45,6 @@ header h1 {
   align-items: center;
 }
 
-.speed-control {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-left: 1rem;
-  padding-left: 1rem;
-  border-left: 1px solid #2d3a5a;
-}
-
-.speed-control label {
-  font-size: 0.9rem;
-  color: #b0b8d4;
-}
-
-.speed-control input[type="range"] {
-  width: 100px;
-  cursor: pointer;
-}
-
-.speed-control span {
-  font-size: 0.9rem;
-  color: #b0b8d4;
-  min-width: 30px;
-}
-
 .controls button {
   padding: 0.5rem 1.5rem;
   font-size: 0.9rem;
@@ -97,14 +72,6 @@ header h1 {
 
 #startBtn:hover {
   background: linear-gradient(135deg, #5cb860, #4caf50);
-}
-
-#stopBtn {
-  background: linear-gradient(135deg, #f44336, #da190b);
-}
-
-#stopBtn:hover {
-  background: linear-gradient(135deg, #f55c4f, #f44336);
 }
 
 #cgBtn {
@@ -233,19 +200,3 @@ canvas {
   font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
 }
 
-footer {
-  background: #1a1f3a;
-  padding: 0.75rem 2rem;
-  border-top: 2px solid #2d3a5a;
-}
-
-.stats {
-  display: flex;
-  gap: 2rem;
-  font-size: 0.9rem;
-  color: #b0b8d4;
-}
-
-.stats span {
-  font-weight: 500;
-}

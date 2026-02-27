@@ -1,39 +1,33 @@
+import { FADE_IN, FADE_OUT, HOP_DELAY, PACKET_RADIUS, PACKET_COLOR, PACKET_HALO_COLOR } from "./constants.js";
+
 export class DataPacket {
-  constructor(fromX, fromY, toX, toY, startTime, duration) {
+  constructor(fromX, fromY, toX, toY, startTime) {
     this.fromX = fromX;
     this.fromY = fromY;
     this.toX = toX;
     this.toY = toY;
     this.startTime = startTime;
-    this.duration = duration;
-    this.size = 4;
-    this.fadeInDuration = 150;
-    this.fadeOutDuration = 150;
+    this.duration = FADE_IN + HOP_DELAY + FADE_OUT;
+    this.fadeInDuration = FADE_IN;
+    this.fadeOutDuration = FADE_OUT;
   }
 
   getCurrentPosition(currentTime) {
     const elapsed = currentTime - this.startTime;
     const fadeOutStart = this.duration - this.fadeOutDuration;
 
-    let x, y, alpha;
-
     if (elapsed < this.fadeInDuration) {
-      x = this.fromX;
-      y = this.fromY;
-      alpha = elapsed / this.fadeInDuration;
+      return { x: this.fromX, y: this.fromY };
     } else if (elapsed < fadeOutStart) {
       const moveProgress =
         (elapsed - this.fadeInDuration) / (fadeOutStart - this.fadeInDuration);
-      x = this.fromX + (this.toX - this.fromX) * moveProgress;
-      y = this.fromY + (this.toY - this.fromY) * moveProgress;
-      alpha = 1;
+      return {
+        x: this.fromX + (this.toX - this.fromX) * moveProgress,
+        y: this.fromY + (this.toY - this.fromY) * moveProgress,
+      };
     } else {
-      x = this.toX;
-      y = this.toY;
-      alpha = 1 - (elapsed - fadeOutStart) / this.fadeOutDuration;
+      return { x: this.toX, y: this.toY };
     }
-
-    return { x, y, alpha: Math.max(0, Math.min(1, alpha)) };
   }
 
   isComplete(currentTime) {
@@ -41,23 +35,17 @@ export class DataPacket {
   }
 
   draw(ctx, currentTime) {
-    const { x, y, alpha } = this.getCurrentPosition(currentTime);
-
-    ctx.shadowColor = `rgba(255, 193, 7, ${alpha})`;
-    ctx.shadowBlur = alpha * 25;
+    const { x, y } = this.getCurrentPosition(currentTime);
 
     ctx.beginPath();
-    ctx.arc(x, y, this.size, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(255, 193, 7, ${alpha})`;
+    ctx.arc(x, y, PACKET_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = PACKET_COLOR;
     ctx.fill();
 
     ctx.beginPath();
-    ctx.arc(x, y, this.size + 2, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(255, 193, 7, ${alpha * 0.5})`;
+    ctx.arc(x, y, PACKET_RADIUS + 2, 0, Math.PI * 2);
+    ctx.strokeStyle = PACKET_HALO_COLOR;
     ctx.lineWidth = 2;
     ctx.stroke();
-
-    ctx.shadowColor = "transparent";
-    ctx.shadowBlur = 0;
   }
 }

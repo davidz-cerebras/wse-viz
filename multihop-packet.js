@@ -1,14 +1,12 @@
+import { FADE_IN, FADE_OUT, HOP_DELAY, PACKET_RADIUS, PACKET_COLOR, PACKET_HALO_COLOR } from "./constants.js";
+
 export class MultiHopPacket {
-  constructor(fromRow, fromCol, toRow, toCol, startTime, hopDelay = 300) {
+  constructor(fromRow, fromCol, toRow, toCol, startTime) {
     this.fromRow = fromRow;
     this.fromCol = fromCol;
     this.toRow = toRow;
     this.toCol = toCol;
     this.startTime = startTime;
-    this.hopDelay = hopDelay;
-    this.size = 4;
-    this.fadeInDuration = 100;
-    this.fadeOutDuration = 100;
     this.currentHop = 0;
     this.totalHops = 0;
     this.path = [];
@@ -40,24 +38,21 @@ export class MultiHopPacket {
   getCurrentPosition(currentTime, grid) {
     const elapsed = currentTime - this.startTime;
     const totalDuration =
-      this.totalHops * this.hopDelay +
-      this.fadeInDuration +
-      this.fadeOutDuration;
+      this.totalHops * HOP_DELAY + FADE_IN + FADE_OUT;
 
-    if (elapsed < this.fadeInDuration) {
+    if (elapsed < FADE_IN) {
       const fromPE = grid.getPE(this.fromRow, this.fromCol);
       if (fromPE) {
         return {
           x: fromPE.x + grid.cellSize / 2,
           y: fromPE.y + grid.cellSize / 2,
-          alpha: elapsed / this.fadeInDuration,
           isComplete: false,
         };
       }
-    } else if (elapsed < totalDuration - this.fadeOutDuration) {
-      const moveElapsed = elapsed - this.fadeInDuration;
-      const hopIndex = Math.floor(moveElapsed / this.hopDelay);
-      const hopProgress = (moveElapsed % this.hopDelay) / this.hopDelay;
+    } else if (elapsed < totalDuration - FADE_OUT) {
+      const moveElapsed = elapsed - FADE_IN;
+      const hopIndex = Math.floor(moveElapsed / HOP_DELAY);
+      const hopProgress = (moveElapsed % HOP_DELAY) / HOP_DELAY;
 
       if (hopIndex < this.path.length) {
         const prevPos =
@@ -81,56 +76,45 @@ export class MultiHopPacket {
             prevPos.y +
             grid.cellSize / 2 +
             (nextPos.y - prevPos.y) * hopProgress;
-          return { x, y, alpha: 1, isComplete: false };
+          return { x, y, isComplete: false };
         }
       }
     } else {
       const toPE = grid.getPE(this.toRow, this.toCol);
       if (toPE) {
-        const fadeElapsed = elapsed - (totalDuration - this.fadeOutDuration);
-        const alpha = 1 - fadeElapsed / this.fadeOutDuration;
         return {
           x: toPE.x + grid.cellSize / 2,
           y: toPE.y + grid.cellSize / 2,
-          alpha: Math.max(0, alpha),
           isComplete: false,
         };
       }
     }
 
-    return { x: 0, y: 0, alpha: 0, isComplete: true };
+    return { x: 0, y: 0, isComplete: true };
   }
 
   isComplete(currentTime) {
     const totalDuration =
-      this.totalHops * this.hopDelay +
-      this.fadeInDuration +
-      this.fadeOutDuration;
+      this.totalHops * HOP_DELAY + FADE_IN + FADE_OUT;
     return currentTime - this.startTime >= totalDuration;
   }
 
   draw(ctx, currentTime, grid) {
-    const { x, y, alpha, isComplete } = this.getCurrentPosition(
+    const { x, y, isComplete } = this.getCurrentPosition(
       currentTime,
       grid,
     );
     if (isComplete) return;
 
-    ctx.shadowColor = `rgba(255, 193, 7, ${alpha})`;
-    ctx.shadowBlur = alpha * 25;
-
     ctx.beginPath();
-    ctx.arc(x, y, this.size, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(255, 193, 7, ${alpha})`;
+    ctx.arc(x, y, PACKET_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = PACKET_COLOR;
     ctx.fill();
 
     ctx.beginPath();
-    ctx.arc(x, y, this.size + 2, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(255, 193, 7, ${alpha * 0.5})`;
+    ctx.arc(x, y, PACKET_RADIUS + 2, 0, Math.PI * 2);
+    ctx.strokeStyle = PACKET_HALO_COLOR;
     ctx.lineWidth = 2;
     ctx.stroke();
-
-    ctx.shadowColor = "transparent";
-    ctx.shadowBlur = 0;
   }
 }
