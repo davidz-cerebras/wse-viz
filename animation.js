@@ -3,34 +3,26 @@ export class AnimationLoop {
     this.updateFn = updateFn;
     this.drawFn = drawFn;
     this.running = false;
-    this.lastTime = 0;
-    this.fps = 60;
-    this.frameInterval = 1000 / this.fps;
+    this.rafId = 0;
+    this.boundLoop = (ts) => this.loop(ts);
   }
 
   start() {
     if (this.running) return;
     this.running = true;
-    this.lastTime = performance.now();
-    this.loop();
+    this.rafId = requestAnimationFrame(this.boundLoop);
   }
 
   stop() {
     this.running = false;
+    cancelAnimationFrame(this.rafId);
+    this.rafId = 0;
   }
 
-  loop() {
+  loop(timestamp) {
     if (!this.running) return;
-
-    const currentTime = performance.now();
-    const deltaTime = currentTime - this.lastTime;
-
-    if (deltaTime >= this.frameInterval) {
-      this.lastTime = currentTime - (deltaTime % this.frameInterval);
-      this.updateFn(deltaTime);
-      this.drawFn();
-    }
-
-    requestAnimationFrame(() => this.loop());
+    this.updateFn(timestamp);
+    this.drawFn(timestamp);
+    this.rafId = requestAnimationFrame(this.boundLoop);
   }
 }

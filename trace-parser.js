@@ -3,6 +3,39 @@ const landingRegex =
 const exOpRegex = /^@(\d+) P(\d+)\.(\d+):.*\[EX OP\]/;
 const opcodeRegex = /T\d+(?:\.\w+)?\s+(\S+)/;
 
+function parseLanding(line) {
+  if (!line.includes(") landing C")) return null;
+  const m = line.match(landingRegex);
+  if (!m) return null;
+  return {
+    cycle: parseInt(m[1]),
+    x: parseInt(m[2]),
+    y: parseInt(m[3]),
+    color: parseInt(m[4]),
+    dir: m[5],
+  };
+}
+
+function parseExOp(line) {
+  if (!line.includes("[EX OP]")) return null;
+  const m = line.match(exOpRegex);
+  if (!m) return null;
+  const busy = !line.includes("[EX OP] IDLE");
+  let op = null;
+  if (busy) {
+    const afterExOp = line.split("[EX OP]")[1];
+    const opcodeMatch = afterExOp.match(opcodeRegex);
+    if (opcodeMatch) op = opcodeMatch[1];
+  }
+  return {
+    cycle: parseInt(m[1]),
+    x: parseInt(m[2]),
+    y: parseInt(m[3]),
+    busy,
+    op,
+  };
+}
+
 export class TraceParser {
   static async index(file) {
     let dimX = 0;
@@ -49,39 +82,24 @@ export class TraceParser {
         }
       }
 
-      if (line.includes(") landing C")) {
-        const m = line.match(landingRegex);
-        if (m) {
-          const cycle = parseInt(m[1]);
-          if (cycle < minCycle) minCycle = cycle;
-          if (cycle > maxCycle) maxCycle = cycle;
-          totalEvents++;
-          hasEvents = true;
-        }
-      } else if (line.includes("[EX OP]")) {
-        const m = line.match(exOpRegex);
-        if (m) {
-          const cycle = parseInt(m[1]);
-          const x = parseInt(m[2]);
-          const y = parseInt(m[3]);
-          const busy = !line.includes("[EX OP] IDLE");
-          let op = null;
-          if (busy) {
-            const afterExOp = line.split("[EX OP]")[1];
-            const opcodeMatch = afterExOp.match(opcodeRegex);
-            if (opcodeMatch) op = opcodeMatch[1];
-          }
-
-          const key = `${x},${y}`;
-          const state = busy ? `1:${op}` : "0";
+      const landing = parseLanding(line);
+      if (landing) {
+        if (landing.cycle < minCycle) minCycle = landing.cycle;
+        if (landing.cycle > maxCycle) maxCycle = landing.cycle;
+        totalEvents++;
+        hasEvents = true;
+      } else {
+        const ex = parseExOp(line);
+        if (ex) {
+          const key = `${ex.x},${ex.y}`;
+          const state = ex.busy ? `1:${ex.op}` : "0";
           if (prevState.get(key) !== state) {
             prevState.set(key, state);
             if (!peStateIndex.has(key)) peStateIndex.set(key, []);
-            peStateIndex.get(key).push({ cycle, busy, op });
-            if (cycle < minCycle) minCycle = cycle;
-            if (cycle > maxCycle) maxCycle = cycle;
+            peStateIndex.get(key).push({ cycle: ex.cycle, busy: ex.busy, op: ex.op });
+            if (ex.cycle < minCycle) minCycle = ex.cycle;
+            if (ex.cycle > maxCycle) maxCycle = ex.cycle;
           }
-
           hasEvents = true;
         }
       }
@@ -104,7 +122,9 @@ export class TraceParser {
 
       for (const line of lines) {
         const lineByteStart = byteOffset;
-        byteOffset += line.length + 1; // +1 for \n; correct for ASCII
+        // Byte offset tracking assumes ASCII (1 byte per char). This is safe
+        // because simfabric trace files are always pure ASCII.
+        byteOffset += line.length + 1;
         processLine(line, lineByteStart);
       }
     }
@@ -124,9 +144,9 @@ export class TraceParser {
 
     const len = tmpCycles.length;
     const cycleIndex = {
-      cycles: new Int32Array(tmpCycles),
-      starts: new Uint32Array(tmpStarts),
-      ends: new Uint32Array(tmpEnds),
+      cycles: new Float64Array(tmpCycles),
+      starts: new Float64Array(tmpStarts),
+      ends: new Float64Array(tmpEnds),
       length: len,
     };
 
@@ -167,6 +187,23 @@ export class TraceParser {
     return lo;
   }
 
+  static findCycleIndexLE(cycleIndex, cycle) {
+    const { cycles, length } = cycleIndex;
+    let lo = 0;
+    let hi = length - 1;
+    let found = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (cycles[mid] <= cycle) {
+        found = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return found;
+  }
+
   static async loadCycleRange(traceData, fromIdx, toIdx) {
     const { file, cycleIndex } = traceData;
     if (fromIdx < 0 || toIdx >= cycleIndex.length || fromIdx > toIdx) {
@@ -178,45 +215,30 @@ export class TraceParser {
     const text = await blob.text();
 
     const result = new Map();
-    const lines = text.split("\n");
+    const prevState = new Map();
 
-    for (const line of lines) {
-      if (line.includes(") landing C")) {
-        const m = line.match(landingRegex);
-        if (m) {
-          const cycle = parseInt(m[1]);
-          if (!result.has(cycle))
-            result.set(cycle, { landings: [], execChanges: [] });
-          result
-            .get(cycle)
-            .landings.push({
-              x: parseInt(m[2]),
-              y: parseInt(m[3]),
-              color: parseInt(m[4]),
-              dir: m[5],
-            });
-        }
-      } else if (line.includes("[EX OP]")) {
-        const m = line.match(exOpRegex);
-        if (m) {
-          const cycle = parseInt(m[1]);
-          const busy = !line.includes("[EX OP] IDLE");
-          let op = null;
-          if (busy) {
-            const afterExOp = line.split("[EX OP]")[1];
-            const opcodeMatch = afterExOp.match(opcodeRegex);
-            if (opcodeMatch) op = opcodeMatch[1];
-          }
-          if (!result.has(cycle))
-            result.set(cycle, { landings: [], execChanges: [] });
-          result
-            .get(cycle)
-            .execChanges.push({
-              x: parseInt(m[2]),
-              y: parseInt(m[3]),
-              busy,
-              op,
-            });
+    function getOrCreateCycle(cycle) {
+      let entry = result.get(cycle);
+      if (!entry) {
+        entry = { landings: [], execChanges: [] };
+        result.set(cycle, entry);
+      }
+      return entry;
+    }
+
+    for (const line of text.split("\n")) {
+      const landing = parseLanding(line);
+      if (landing) {
+        getOrCreateCycle(landing.cycle).landings.push(landing);
+        continue;
+      }
+      const ex = parseExOp(line);
+      if (ex) {
+        const key = `${ex.x},${ex.y}`;
+        const state = ex.busy ? `1:${ex.op}` : "0";
+        if (prevState.get(key) !== state) {
+          prevState.set(key, state);
+          getOrCreateCycle(ex.cycle).execChanges.push(ex);
         }
       }
     }
@@ -224,6 +246,11 @@ export class TraceParser {
     return result;
   }
 
+  // Returns the source PE coordinates for a landing event. The direction
+  // indicates which link the wavelet arrived on, NOT which compass direction
+  // the source is in. "from link N" means the wavelet used the north-facing
+  // link of the neighbor at y-1 (the tile to the south in trace coordinates).
+  // This mapping is intentional and matches the simfabric trace format.
   static sourceCoords(x, y, dir) {
     switch (dir) {
       case "W":
