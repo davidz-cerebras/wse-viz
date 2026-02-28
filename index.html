@@ -20,7 +20,6 @@
             Load Trace
             <input type="file" id="traceFileInput" accept=".log" hidden />
           </label>
-          <button id="replayTraceBtn" disabled>Replay Trace</button>
         </div>
       </header>
       <main>
@@ -91,10 +90,17 @@
         </div>
         <div class="trace-panel" id="tracePanel">
           <h2>Trace Events</h2>
-          <span id="cycleDisplay" class="cycle-display"></span>
           <div id="traceLog" class="trace-log"></div>
         </div>
       </main>
+      <div class="playback-bar" id="playbackBar">
+        <button id="playPauseBtn" title="Play/Pause">&#9654;</button>
+        <input type="range" id="scrubBar" min="0" max="0" value="0" />
+        <span id="cycleDisplay" class="cycle-display"></span>
+        <button id="speedDown" class="speed-btn" title="Halve speed">&minus;</button>
+        <span id="speedDisplay" class="speed-display">4 cyc/s</span>
+        <button id="speedUp" class="speed-btn" title="Double speed">+</button>
+      </div>
     </div>
     <script type="module" src="app.js"></script>
   </body>

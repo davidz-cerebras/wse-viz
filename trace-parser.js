@@ -88,7 +88,20 @@ export class TraceParser {
       }
     }
 
-    return { dimX, dimY, eventsByCycle, minCycle, maxCycle, totalEvents };
+    // Build per-PE state index for efficient scrub reconstruction
+    const peStateIndex = new Map();
+    for (const [cycle, events] of eventsByCycle) {
+      for (const evt of events.execChanges) {
+        const key = `${evt.x},${evt.y}`;
+        if (!peStateIndex.has(key)) peStateIndex.set(key, []);
+        peStateIndex.get(key).push({ cycle, busy: evt.busy, op: evt.op });
+      }
+    }
+    for (const arr of peStateIndex.values()) {
+      arr.sort((a, b) => a.cycle - b.cycle);
+    }
+
+    return { dimX, dimY, eventsByCycle, minCycle, maxCycle, totalEvents, peStateIndex };
   }
 
   static sourceCoords(x, y, dir) {

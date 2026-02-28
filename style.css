@@ -97,19 +97,6 @@ header h1 {
   transform: translateY(-1px);
 }
 
-#replayTraceBtn {
-  background: linear-gradient(135deg, #00bcd4, #0097a7);
-}
-
-#replayTraceBtn:hover:not(:disabled) {
-  background: linear-gradient(135deg, #26c6da, #00bcd4);
-}
-
-#replayTraceBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .cycle-display {
   font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
   font-size: 0.85rem;
@@ -173,6 +160,91 @@ canvas {
   font-weight: 600;
   color: #64b5f6;
   margin-bottom: 0.5rem;
+}
+
+.playback-bar {
+  display: none;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 2rem;
+  background: linear-gradient(135deg, #1a1f3a 0%, #0d1121 100%);
+  border-top: 2px solid #2d3a5a;
+}
+
+#playPauseBtn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 0.9rem;
+  line-height: 32px;
+  text-align: center;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  background: #2d3a5a;
+  color: #ffffff;
+  flex-shrink: 0;
+}
+
+#playPauseBtn:hover {
+  background: #3d4a6a;
+}
+
+#scrubBar {
+  flex: 1;
+  height: 6px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: #2d3a5a;
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+}
+
+#scrubBar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #64b5f6;
+  cursor: pointer;
+}
+
+#scrubBar::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #64b5f6;
+  border: none;
+  cursor: pointer;
+}
+
+.speed-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 1rem;
+  line-height: 28px;
+  text-align: center;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  background: #2d3a5a;
+  color: #ffffff;
+  flex-shrink: 0;
+}
+
+.speed-btn:hover {
+  background: #3d4a6a;
+}
+
+.speed-display {
+  font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
+  font-size: 0.8rem;
+  color: #b0b8d4;
+  min-width: 56px;
+  text-align: center;
+  flex-shrink: 0;
 }
 
 .trace-log {

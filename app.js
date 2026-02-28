@@ -1,7 +1,8 @@
 import { Grid } from "./grid.js";
+import { DataPacket } from "./packet.js";
 import { AnimationLoop } from "./animation.js";
 import { TraceParser } from "./trace-parser.js";
-import { GRID_ROWS, GRID_COLS, CELL_SIZE, GAP, MS_PER_CYCLE } from "./constants.js";
+import { GRID_ROWS, GRID_COLS, CELL_SIZE, GAP } from "./constants.js";
 
 let grid;
 let animationLoop;
@@ -9,8 +10,7 @@ let canvas;
 let ctx;
 let simulationInterval;
 let traceData = null;
-let replayTimeouts = [];
-let isReplaying = false;
+let replayState = null;
 
 function init() {
   canvas = document.getElementById("wseCanvas");
@@ -25,6 +25,39 @@ function init() {
 
 function update() {
   grid.update();
+
+  if (replayState && replayState.playing) {
+    const now = performance.now();
+    const elapsed = now - replayState.lastTickTime;
+    const msPerCycle = 1000 / replayState.speed;
+    const cyclesToAdvance = Math.floor(elapsed / msPerCycle);
+
+    if (cyclesToAdvance > 0) {
+      replayState.lastTickTime += cyclesToAdvance * msPerCycle;
+      const endCycle = Math.min(
+        replayState.currentCycle + cyclesToAdvance,
+        replayState.maxCycle,
+      );
+
+      for (
+        let cycle = replayState.currentCycle + 1;
+        cycle <= endCycle;
+        cycle++
+      ) {
+        applyCycleEvents(cycle, msPerCycle);
+      }
+
+      replayState.currentCycle = endCycle;
+      updateScrubUI();
+
+      if (endCycle >= replayState.maxCycle) {
+        replayState.playing = false;
+        document.getElementById("playPauseBtn").textContent = "\u25B6";
+        document.getElementById("cycleDisplay").textContent =
+          `Done (${traceData.totalEvents} events)`;
+      }
+    }
+  }
 }
 
 function draw() {
@@ -87,9 +120,41 @@ function setupEventListeners() {
   document
     .getElementById("traceFileInput")
     .addEventListener("change", handleTraceFile);
-  document
-    .getElementById("replayTraceBtn")
-    .addEventListener("click", replayTrace);
+  document.getElementById("scrubBar").addEventListener("input", (e) => {
+    if (!replayState) return;
+    seekToCycle(parseInt(e.target.value));
+  });
+  document.getElementById("playPauseBtn").addEventListener("click", () => {
+    if (!replayState) return;
+    replayState.playing = !replayState.playing;
+    if (replayState.playing) {
+      replayState.lastTickTime = performance.now();
+      // Unfreeze any frozen packets from scrubbing
+      const msPerCycle = 1000 / replayState.speed;
+      const now = Date.now();
+      for (const pkt of grid.packets) {
+        if (pkt.startTime === Infinity) {
+          pkt.startTime = now;
+          pkt.duration = msPerCycle;
+        }
+      }
+      document.getElementById("playPauseBtn").textContent = "\u23F8";
+    } else {
+      document.getElementById("playPauseBtn").textContent = "\u25B6";
+    }
+  });
+  document.getElementById("speedDown").addEventListener("click", () => {
+    if (!replayState || replayState.speed <= 1) return;
+    replayState.speed /= 2;
+    replayState.lastTickTime = performance.now();
+    document.getElementById("speedDisplay").textContent = `${replayState.speed} cyc/s`;
+  });
+  document.getElementById("speedUp").addEventListener("click", () => {
+    if (!replayState) return;
+    replayState.speed *= 2;
+    replayState.lastTickTime = performance.now();
+    document.getElementById("speedDisplay").textContent = `${replayState.speed} cyc/s`;
+  });
 }
 
 function startAllReduceFull() {
@@ -150,6 +215,8 @@ function showPanel(panel) {
     panel === "cg" ? "flex" : "none";
   document.getElementById("tracePanel").style.display =
     panel === "trace" ? "flex" : "none";
+  document.getElementById("playbackBar").style.display =
+    panel === "trace" ? "flex" : "none";
 }
 
 function appendTraceEvents(cycle, events) {
@@ -189,73 +256,143 @@ async function handleTraceFile(event) {
   const file = event.target.files[0];
   if (!file) return;
 
+  stopSimulation();
   traceData = await TraceParser.parse(file);
 
   setGrid(traceData.dimY, traceData.dimX);
-  document.getElementById("replayTraceBtn").disabled = false;
-}
-
-function replayTrace() {
-  if (!traceData || isReplaying) return;
-
-  stopSimulation();
-  isReplaying = true;
   animationLoop.start();
   showPanel("trace");
   document.getElementById("traceLog").innerHTML = "";
 
-  setGrid(traceData.dimY, traceData.dimX);
+  const { minCycle, maxCycle } = traceData;
+  const speed = 4;
+  document.getElementById("speedDisplay").textContent = `${speed} cyc/s`;
 
-  const { eventsByCycle, minCycle, maxCycle } = traceData;
-  const cycleDisplay = document.getElementById("cycleDisplay");
+  replayState = {
+    currentCycle: minCycle,
+    speed,
+    playing: false,
+    lastTickTime: performance.now(),
+    minCycle,
+    maxCycle,
+  };
 
-  for (let cycle = minCycle; cycle <= maxCycle; cycle++) {
-    const delayMs = (cycle - minCycle) * MS_PER_CYCLE;
-    const events = eventsByCycle.get(cycle);
+  const scrubBar = document.getElementById("scrubBar");
+  scrubBar.min = minCycle;
+  scrubBar.max = maxCycle;
+  scrubBar.value = minCycle;
 
-    const timeoutId = setTimeout(() => {
-      cycleDisplay.textContent = `Cycle ${cycle} / ${maxCycle}`;
+  document.getElementById("playPauseBtn").textContent = "\u25B6";
+  updateScrubUI();
+}
 
-      if (!events) return;
+function applyCycleEvents(cycle, msPerCycle) {
+  const events = traceData.eventsByCycle.get(cycle);
+  if (!events) return;
 
-      appendTraceEvents(cycle, events);
+  appendTraceEvents(cycle, events);
 
-      for (const evt of events.landings) {
-        const dest = TraceParser.toGridCoords(evt.x, evt.y, traceData.dimY);
+  for (const evt of events.landings) {
+    const dest = TraceParser.toGridCoords(evt.x, evt.y, traceData.dimY);
 
-        if (evt.dir !== "R") {
-          const src = TraceParser.sourceCoords(evt.x, evt.y, evt.dir);
-          if (src) {
-            const srcGrid = TraceParser.toGridCoords(src.x, src.y, traceData.dimY);
-            grid.sendPacket(srcGrid.row, srcGrid.col, dest.row, dest.col, MS_PER_CYCLE);
-          }
-        }
+    if (evt.dir !== "R") {
+      const src = TraceParser.sourceCoords(evt.x, evt.y, evt.dir);
+      if (src) {
+        const srcGrid = TraceParser.toGridCoords(src.x, src.y, traceData.dimY);
+        grid.sendPacket(srcGrid.row, srcGrid.col, dest.row, dest.col, msPerCycle);
       }
-
-      for (const evt of events.execChanges) {
-        const { row, col } = TraceParser.toGridCoords(evt.x, evt.y, traceData.dimY);
-        grid.setPEBusy(row, col, evt.busy, evt.op);
-      }
-    }, delayMs);
-
-    replayTimeouts.push(timeoutId);
+    }
   }
 
-  const totalDuration = (maxCycle - minCycle) * MS_PER_CYCLE + 500;
-  const endTimeout = setTimeout(() => {
-    isReplaying = false;
-    cycleDisplay.textContent = `Done (${traceData.totalEvents} events)`;
-  }, totalDuration);
-  replayTimeouts.push(endTimeout);
+  for (const evt of events.execChanges) {
+    const { row, col } = TraceParser.toGridCoords(evt.x, evt.y, traceData.dimY);
+    grid.setPEBusy(row, col, evt.busy, evt.op);
+  }
+}
+
+function updateScrubUI() {
+  if (!replayState) return;
+  const scrubBar = document.getElementById("scrubBar");
+  const cycleDisplay = document.getElementById("cycleDisplay");
+  scrubBar.value = replayState.currentCycle;
+  cycleDisplay.textContent =
+    `Cycle ${replayState.currentCycle} / ${replayState.maxCycle}`;
+}
+
+function seekToCycle(targetCycle) {
+  if (!replayState || !traceData) return;
+
+  // Clear in-flight packets
+  grid.packets.length = 0;
+
+  // Reconstruct PE states from peStateIndex via binary search
+  const { peStateIndex } = traceData;
+
+  // Reset all PEs
+  for (let r = 0; r < grid.rows; r++) {
+    for (let c = 0; c < grid.cols; c++) {
+      grid.setPEBusy(r, c, false, null);
+    }
+  }
+
+  // Apply last known state at or before targetCycle for each PE
+  for (const [key, events] of peStateIndex) {
+    // Binary search for last event with cycle <= targetCycle
+    let lo = 0;
+    let hi = events.length - 1;
+    let found = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (events[mid].cycle <= targetCycle) {
+        found = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+
+    if (found >= 0) {
+      const evt = events[found];
+      const [x, y] = key.split(",").map(Number);
+      const { row, col } = TraceParser.toGridCoords(x, y, traceData.dimY);
+      grid.setPEBusy(row, col, evt.busy, evt.op);
+    }
+  }
+
+  // Create frozen packets at origin for this cycle's landings
+  const events = traceData.eventsByCycle.get(targetCycle);
+  if (events) {
+    for (const evt of events.landings) {
+      if (evt.dir === "R") continue;
+      const src = TraceParser.sourceCoords(evt.x, evt.y, evt.dir);
+      if (!src) continue;
+      const srcGrid = TraceParser.toGridCoords(src.x, src.y, traceData.dimY);
+      const destGrid = TraceParser.toGridCoords(evt.x, evt.y, traceData.dimY);
+      const fromPE = grid.getPE(srcGrid.row, srcGrid.col);
+      const toPE = grid.getPE(destGrid.row, destGrid.col);
+      if (fromPE && toPE) {
+        const fromX = fromPE.x + grid.cellSize / 2;
+        const fromY = fromPE.y + grid.cellSize / 2;
+        const toX = toPE.x + grid.cellSize / 2;
+        const toY = toPE.y + grid.cellSize / 2;
+        grid.packets.push(
+          new DataPacket(fromX, fromY, toX, toY, Infinity, 1000 / replayState.speed),
+        );
+      }
+    }
+  }
+
+  // Clear trace log and update state
+  document.getElementById("traceLog").innerHTML = "";
+  replayState.currentCycle = targetCycle;
+  replayState.lastTickTime = performance.now();
+  updateScrubUI();
 }
 
 function cancelReplay() {
-  for (const id of replayTimeouts) {
-    clearTimeout(id);
-  }
-  replayTimeouts = [];
-  isReplaying = false;
+  replayState = null;
   document.getElementById("cycleDisplay").textContent = "";
+  document.getElementById("playbackBar").style.display = "none";
 }
 
 document.addEventListener("DOMContentLoaded", init);
