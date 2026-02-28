@@ -10,6 +10,10 @@ export class TraceParser {
     const dimRegex = /^@\d+ dimX=(\d+), dimY=(\d+)/;
     const landingRegex =
       /^@(\d+) P(\d+)\.(\d+) \(\w+\) landing C(\d+) from link ([WESNR]),/;
+    const exOpRegex = /^@(\d+) P(\d+)\.(\d+):.*\[EX OP\]/;
+    const opcodeRegex = /T\d+(?:\.\w+)?\s+(\S+)/;
+
+    const prevState = new Map();
 
     const reader = file
       .stream()
@@ -35,25 +39,52 @@ export class TraceParser {
           }
         }
 
-        if (!line.includes(") landing C")) continue;
+        if (line.includes(") landing C")) {
+          const m = line.match(landingRegex);
+          if (m) {
+            const cycle = parseInt(m[1]);
+            const x = parseInt(m[2]);
+            const y = parseInt(m[3]);
+            const color = parseInt(m[4]);
+            const dir = m[5];
 
-        const m = line.match(landingRegex);
-        if (!m) continue;
+            if (!eventsByCycle.has(cycle)) {
+              eventsByCycle.set(cycle, { landings: [], execChanges: [] });
+            }
+            eventsByCycle.get(cycle).landings.push({ x, y, color, dir });
 
-        const cycle = parseInt(m[1]);
-        const x = parseInt(m[2]);
-        const y = parseInt(m[3]);
-        const color = parseInt(m[4]);
-        const dir = m[5];
+            if (cycle < minCycle) minCycle = cycle;
+            if (cycle > maxCycle) maxCycle = cycle;
+            totalEvents++;
+          }
+        } else if (line.includes("[EX OP]")) {
+          const m = line.match(exOpRegex);
+          if (m) {
+            const cycle = parseInt(m[1]);
+            const x = parseInt(m[2]);
+            const y = parseInt(m[3]);
+            const busy = !line.includes("[EX OP] IDLE");
+            let op = null;
+            if (busy) {
+              const afterExOp = line.split("[EX OP]")[1];
+              const opcodeMatch = afterExOp.match(opcodeRegex);
+              if (opcodeMatch) op = opcodeMatch[1];
+            }
+            const key = `${x},${y}`;
+            const state = busy ? `1:${op}` : "0";
 
-        if (!eventsByCycle.has(cycle)) {
-          eventsByCycle.set(cycle, []);
+            if (prevState.get(key) !== state) {
+              prevState.set(key, state);
+              if (!eventsByCycle.has(cycle)) {
+                eventsByCycle.set(cycle, { landings: [], execChanges: [] });
+              }
+              eventsByCycle.get(cycle).execChanges.push({ x, y, busy, op });
+
+              if (cycle < minCycle) minCycle = cycle;
+              if (cycle > maxCycle) maxCycle = cycle;
+            }
+          }
         }
-        eventsByCycle.get(cycle).push({ cycle, x, y, color, dir });
-
-        if (cycle < minCycle) minCycle = cycle;
-        if (cycle > maxCycle) maxCycle = cycle;
-        totalEvents++;
       }
     }
 

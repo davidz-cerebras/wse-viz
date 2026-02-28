@@ -40,7 +40,14 @@ export class Grid {
     }
   }
 
-  sendPacket(fromRow, fromCol, toRow, toCol) {
+  setPEBusy(row, col, busy, op) {
+    const pe = this.getPE(row, col);
+    if (pe) {
+      pe.setBusy(busy, op);
+    }
+  }
+
+  sendPacket(fromRow, fromCol, toRow, toCol, duration) {
     const fromPE = this.getPE(fromRow, fromCol);
     const toPE = this.getPE(toRow, toCol);
 
@@ -54,7 +61,7 @@ export class Grid {
     const toY = toPE.y + this.cellSize / 2;
 
     this.packets.push(
-      new DataPacket(fromX, fromY, toX, toY, Date.now()),
+      new DataPacket(fromX, fromY, toX, toY, Date.now(), duration),
     );
   }
 

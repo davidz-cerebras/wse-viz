@@ -1,15 +1,21 @@
 import { FADE_IN, FADE_OUT, HOP_DELAY, PACKET_RADIUS, PACKET_COLOR, PACKET_HALO_COLOR } from "./constants.js";
 
 export class DataPacket {
-  constructor(fromX, fromY, toX, toY, startTime) {
+  constructor(fromX, fromY, toX, toY, startTime, duration) {
     this.fromX = fromX;
     this.fromY = fromY;
     this.toX = toX;
     this.toY = toY;
     this.startTime = startTime;
-    this.duration = FADE_IN + HOP_DELAY + FADE_OUT;
-    this.fadeInDuration = FADE_IN;
-    this.fadeOutDuration = FADE_OUT;
+    if (duration !== undefined) {
+      this.duration = duration;
+      this.fadeInDuration = 0;
+      this.fadeOutDuration = 0;
+    } else {
+      this.duration = FADE_IN + HOP_DELAY + FADE_OUT;
+      this.fadeInDuration = FADE_IN;
+      this.fadeOutDuration = FADE_OUT;
+    }
   }
 
   getCurrentPosition(currentTime) {

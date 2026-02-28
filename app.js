@@ -35,6 +35,8 @@ function draw() {
 function startSimulation() {
   if (simulationInterval) return;
 
+  showPanel("cg");
+  setGrid(GRID_ROWS, GRID_COLS);
   animationLoop.start();
 
   simulationInterval = setInterval(() => {
@@ -92,18 +94,24 @@ function setupEventListeners() {
 
 function startAllReduceFull() {
   stopSimulation();
+  showPanel("cg");
+  setGrid(GRID_ROWS, GRID_COLS);
   animationLoop.start();
   grid.runAllReduce();
 }
 
 function startSpMV() {
   stopSimulation();
+  showPanel("cg");
+  setGrid(GRID_ROWS, GRID_COLS);
   animationLoop.start();
   grid.spmvPattern();
 }
 
 function startCG() {
   stopSimulation();
+  showPanel("cg");
+  setGrid(GRID_ROWS, GRID_COLS);
   animationLoop.start();
   clearCodeHighlight();
   grid.conjugateGradient(5, updateCodePanel);
@@ -135,6 +143,34 @@ function updateCodePanel(phase, stage, step) {
   operationValue.textContent = step.name;
 }
 
+const MAX_LOG_ENTRIES = 500;
+
+function showPanel(panel) {
+  document.getElementById("cgPanel").style.display =
+    panel === "cg" ? "flex" : "none";
+  document.getElementById("tracePanel").style.display =
+    panel === "trace" ? "flex" : "none";
+}
+
+function appendTraceEvents(cycle, events) {
+  const log = document.getElementById("traceLog");
+
+  for (const evt of events.landings) {
+    const entry = document.createElement("div");
+    entry.className = "trace-entry trace-landing";
+    const dir = evt.dir === "R" ? "local" : `\u2190 ${evt.dir}`;
+    entry.innerHTML =
+      `<span class="trace-cycle">@${cycle}</span> P${evt.x}.${evt.y} ${dir} C${evt.color}`;
+    log.appendChild(entry);
+  }
+
+  while (log.children.length > MAX_LOG_ENTRIES) {
+    log.removeChild(log.firstChild);
+  }
+
+  log.scrollTop = log.scrollHeight;
+}
+
 const DEFAULT_DISPLAY_SIZE = GRID_COLS * (CELL_SIZE + GAP) + GAP;
 
 function setGrid(rows, cols) {
@@ -153,15 +189,7 @@ async function handleTraceFile(event) {
   const file = event.target.files[0];
   if (!file) return;
 
-  const statusEl = document.getElementById("traceStatus");
-  statusEl.textContent = "Parsing...";
-
   traceData = await TraceParser.parse(file);
-
-  statusEl.textContent =
-    `${traceData.dimX}x${traceData.dimY} grid, ` +
-    `${traceData.totalEvents} events, ` +
-    `cycles ${traceData.minCycle}\u2013${traceData.maxCycle}`;
 
   setGrid(traceData.dimY, traceData.dimX);
   document.getElementById("replayTraceBtn").disabled = false;
@@ -173,31 +201,40 @@ function replayTrace() {
   stopSimulation();
   isReplaying = true;
   animationLoop.start();
+  showPanel("trace");
+  document.getElementById("traceLog").innerHTML = "";
 
   setGrid(traceData.dimY, traceData.dimX);
 
   const { eventsByCycle, minCycle, maxCycle } = traceData;
   const cycleDisplay = document.getElementById("cycleDisplay");
-  const activeCycles = Array.from(eventsByCycle.keys()).sort((a, b) => a - b);
 
-  for (const cycle of activeCycles) {
+  for (let cycle = minCycle; cycle <= maxCycle; cycle++) {
     const delayMs = (cycle - minCycle) * MS_PER_CYCLE;
     const events = eventsByCycle.get(cycle);
 
     const timeoutId = setTimeout(() => {
       cycleDisplay.textContent = `Cycle ${cycle} / ${maxCycle}`;
 
-      for (const evt of events) {
+      if (!events) return;
+
+      appendTraceEvents(cycle, events);
+
+      for (const evt of events.landings) {
         const dest = TraceParser.toGridCoords(evt.x, evt.y, traceData.dimY);
-        grid.activatePE(dest.row, dest.col);
 
         if (evt.dir !== "R") {
           const src = TraceParser.sourceCoords(evt.x, evt.y, evt.dir);
           if (src) {
             const srcGrid = TraceParser.toGridCoords(src.x, src.y, traceData.dimY);
-            grid.sendPacket(srcGrid.row, srcGrid.col, dest.row, dest.col);
+            grid.sendPacket(srcGrid.row, srcGrid.col, dest.row, dest.col, MS_PER_CYCLE);
           }
         }
+      }
+
+      for (const evt of events.execChanges) {
+        const { row, col } = TraceParser.toGridCoords(evt.x, evt.y, traceData.dimY);
+        grid.setPEBusy(row, col, evt.busy, evt.op);
       }
     }, delayMs);
 

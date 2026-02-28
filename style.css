@@ -110,15 +110,6 @@ header h1 {
   cursor: not-allowed;
 }
 
-.trace-status {
-  font-size: 0.8rem;
-  color: #90a4ae;
-  max-width: 300px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .cycle-display {
   font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
   font-size: 0.85rem;
@@ -140,6 +131,7 @@ main {
   gap: 2rem;
   padding: 2rem;
   background: #0d1121;
+  min-height: 0;
 }
 
 .canvas-container {
@@ -157,7 +149,8 @@ canvas {
 
 }
 
-.code-panel {
+.code-panel,
+.trace-panel {
   width: 400px;
   background: #1a1f3a;
   border: 2px solid #2d3a5a;
@@ -167,6 +160,52 @@ canvas {
   flex-direction: column;
   gap: 1.5rem;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+
+.trace-panel {
+  display: none;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.trace-panel h2 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: #64b5f6;
+  margin-bottom: 0.5rem;
+}
+
+.trace-log {
+  flex: 1;
+  overflow-y: auto;
+  background: #0d1121;
+  border: 1px solid #2d3a5a;
+  border-radius: 6px;
+  padding: 0.5rem;
+  font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.trace-entry {
+  padding: 1px 4px;
+  white-space: nowrap;
+}
+
+.trace-cycle {
+  color: #5c6b8a;
+}
+
+.trace-landing {
+  color: #ffb74d;
+}
+
+.trace-exec-busy {
+  color: #81c784;
+}
+
+.trace-exec-idle {
+  color: #78909c;
 }
 
 .code-panel h2 {

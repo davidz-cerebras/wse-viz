@@ -21,15 +21,13 @@
             <input type="file" id="traceFileInput" accept=".log" hidden />
           </label>
           <button id="replayTraceBtn" disabled>Replay Trace</button>
-          <span id="traceStatus" class="trace-status"></span>
-          <span id="cycleDisplay" class="cycle-display"></span>
         </div>
       </header>
       <main>
         <div class="canvas-container">
           <canvas id="wseCanvas"></canvas>
         </div>
-        <div class="code-panel">
+        <div class="code-panel" id="cgPanel">
           <h2>Conjugate Gradient Algorithm</h2>
           <div class="code-content">
             <div class="code-line" data-line="1">
@@ -90,6 +88,11 @@
               </div>
             </div>
           </div>
+        </div>
+        <div class="trace-panel" id="tracePanel">
+          <h2>Trace Events</h2>
+          <span id="cycleDisplay" class="cycle-display"></span>
+          <div id="traceLog" class="trace-log"></div>
         </div>
       </main>
     </div>
