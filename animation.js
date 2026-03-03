@@ -21,8 +21,16 @@ export class AnimationLoop {
 
   loop(timestamp) {
     if (!this.running) return;
-    this.updateFn(timestamp);
-    this.drawFn(timestamp);
-    this.rafId = requestAnimationFrame(this.boundLoop);
+    try {
+      this.updateFn(timestamp);
+      if (!this.running) return;
+      this.drawFn(timestamp);
+    } catch (e) {
+      this.running = false;
+      throw e;
+    }
+    if (this.running) {
+      this.rafId = requestAnimationFrame(this.boundLoop);
+    }
   }
 }

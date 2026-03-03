@@ -22,6 +22,7 @@ let handleTraceGeneration = 0;
 let selectedPE = null; // { row, col, traceX, traceY, minCycle, cycleStates }
 let peTraceWindowStart = 0; // first cycle rendered in the current DOM window
 let peTraceWindowSize = 0;  // number of entries currently in the DOM
+let peTraceScrollLock = false; // prevents scroll-handler re-entrancy
 const PE_TRACE_WINDOW = 500; // max DOM entries rendered at once
 
 export function initReplay(deps) {
@@ -127,8 +128,8 @@ export function selectPE(row, col, traceX, traceY) {
   const key = `${traceX},${traceY}`;
   const events = replay.traceData.peStateIndex.get(key) || [];
 
-  grid.deselectAllPEs();
   grid.selectPE(row, col);
+  peTraceScrollLock = false;
 
   const { minCycle, maxCycle } = replay.state;
   const totalCycles = maxCycle - minCycle + 1;
@@ -153,13 +154,88 @@ export function selectPE(row, col, traceX, traceY) {
     }
   }
 
-  selectedPE = { row, col, traceX, traceY, minCycle, totalCycles, busyArr, opArr };
+  // Count cycles per opcode for the bar chart (strip .NF/.T suffixes)
+  let idleCycles = 0;
+  const opCounts = new Map();
+  for (let i = 0; i < totalCycles; i++) {
+    if (busyArr[i]) {
+      const o = (opArr[i] || "?").split(".")[0];
+      opCounts.set(o, (opCounts.get(o) || 0) + 1);
+    } else {
+      idleCycles++;
+    }
+  }
+  opCounts.set("IDLE", idleCycles);
+
+  selectedPE = { row, col, traceX, traceY, minCycle, totalCycles, busyArr, opArr, opCounts };
 
   // Update panel header
-  els.tracePanel.querySelector("h2").textContent = `PE P${traceX}.${traceY} Trace`;
+  els.tracePanel.querySelector("h2").textContent = `P${traceX}.${traceY} Trace`;
 
+  renderOpChart();
   renderPETraceWindow(replay.state.currentCycle);
   setupPETraceScroll();
+}
+
+function renderOpChart() {
+  if (!selectedPE) return;
+  const { opCounts } = selectedPE;
+
+  els.opChart.innerHTML = "";
+  els.opChart.classList.remove("hidden");
+  els.panelResizer.classList.remove("hidden");
+
+  if (opCounts.size === 0) {
+    els.opChart.classList.add("hidden");
+    els.panelResizer.classList.add("hidden");
+    return;
+  }
+
+  // Sort by count descending
+  const sorted = [...opCounts.entries()].sort((a, b) => b[1] - a[1]);
+  const maxCount = sorted[0][1];
+
+  for (const [op, count] of sorted) {
+    const row = document.createElement("div");
+    row.className = "op-chart-row";
+    row.dataset.op = op;
+
+    const label = document.createElement("span");
+    label.className = "op-chart-label";
+    label.textContent = op;
+
+    const barContainer = document.createElement("div");
+    barContainer.className = "op-chart-bar-container";
+
+    const bar = document.createElement("div");
+    bar.className = "op-chart-bar";
+    bar.style.width = `${(count / maxCount) * 100}%`;
+
+    const countSpan = document.createElement("span");
+    countSpan.className = "op-chart-count";
+    countSpan.textContent = count;
+
+    barContainer.appendChild(bar);
+    barContainer.appendChild(countSpan);
+    row.appendChild(label);
+    row.appendChild(barContainer);
+    els.opChart.appendChild(row);
+  }
+}
+
+function updateOpChartHighlight() {
+  if (!selectedPE || !replay.state) return;
+  const idx = replay.state.currentCycle - selectedPE.minCycle;
+  let currentOp;
+  if (idx >= 0 && idx < selectedPE.totalCycles && selectedPE.busyArr[idx]) {
+    currentOp = (selectedPE.opArr[idx] || "?").split(".")[0];
+  } else {
+    currentOp = "IDLE";
+  }
+
+  for (const row of els.opChart.children) {
+    row.classList.toggle("active", row.dataset.op === currentOp);
+  }
 }
 
 function renderPETraceWindow(centerCycle) {
@@ -207,15 +283,19 @@ function renderPETraceWindow(centerCycle) {
 function setupPETraceScroll() {
   // Re-render window when user scrolls to edges
   els.traceLog.onscroll = () => {
-    if (!selectedPE) return;
+    if (!selectedPE || peTraceScrollLock) return;
     const log = els.traceLog;
     const atTop = log.scrollTop < 40;
     const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
 
     if (atTop && peTraceWindowStart > 0) {
-      renderPETraceWindow(selectedPE.minCycle + peTraceWindowStart - 1);
+      peTraceScrollLock = true;
+      try { renderPETraceWindow(selectedPE.minCycle + peTraceWindowStart - 1); }
+      finally { peTraceScrollLock = false; }
     } else if (atBottom && peTraceWindowStart + peTraceWindowSize < selectedPE.totalCycles) {
-      renderPETraceWindow(selectedPE.minCycle + peTraceWindowStart + peTraceWindowSize);
+      peTraceScrollLock = true;
+      try { renderPETraceWindow(selectedPE.minCycle + peTraceWindowStart + peTraceWindowSize); }
+      finally { peTraceScrollLock = false; }
     }
   };
 }
@@ -231,6 +311,12 @@ export function deselectPE() {
   // Restore panel header
   els.tracePanel.querySelector("h2").textContent = "Trace Events";
   els.traceLog.innerHTML = "";
+  els.opChart.innerHTML = "";
+  els.opChart.classList.add("hidden");
+  els.panelResizer.classList.add("hidden");
+  // Reset any explicit flex sizing from drag
+  els.traceLog.style.flex = "";
+  els.opChart.style.flex = "";
 }
 
 function updatePETraceHighlight() {
@@ -252,9 +338,13 @@ function updatePETraceHighlight() {
     const entries = els.traceLog.children;
     if (localIdx < entries.length) {
       entries[localIdx].classList.add("current");
-      entries[localIdx].scrollIntoView({ block: "nearest" });
+      peTraceScrollLock = true;
+      try { entries[localIdx].scrollIntoView({ block: "nearest" }); }
+      finally { peTraceScrollLock = false; }
     }
   }
+
+  updateOpChartHighlight();
 }
 
 function updateScrubUI() {
@@ -365,7 +455,7 @@ export function adjustSpeed(factor) {
 }
 
 export function seekToCycle(targetCycle) {
-  if (!replay.state || !replay.traceData) return;
+  if (!replay.state || !replay.traceData || !Number.isFinite(targetCycle)) return;
 
   resetPrefetchState();
   grid.resetTimers();
@@ -412,6 +502,7 @@ export function seekToCycle(targetCycle) {
 }
 
 export function cancelReplay() {
+  handleTraceGeneration++;
   resetPrefetchState();
   deselectPE();
   replay.state = null;
@@ -430,6 +521,11 @@ export async function handleTraceFile(event, setGrid) {
 
   const traceData = await TraceParser.index(file);
   if (myGen !== handleTraceGeneration) return;
+
+  if (traceData.dimX === 0 || traceData.dimY === 0 || traceData.minCycle > traceData.maxCycle) {
+    els.cycleDisplay.textContent = "Error: invalid trace file";
+    return;
+  }
 
   deselectPE();
   replay.traceData = traceData;
@@ -481,15 +577,46 @@ export function setupScrubListeners() {
     }
     const onRelease = () => {
       window.removeEventListener("pointerup", onRelease);
+      window.removeEventListener("pointercancel", onRelease);
       isScrubbing = false;
       if (!replay.state || !scrubWasPlaying) return;
       scrubWasPlaying = false;
       resumePlayback();
     };
     window.addEventListener("pointerup", onRelease);
+    window.addEventListener("pointercancel", onRelease);
   });
   els.scrubBar.addEventListener("input", (e) => {
     if (!replay.state) return;
     seekToCycle(parseInt(e.target.value, 10));
+  });
+
+  // Panel resizer drag
+  els.panelResizer.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    els.panelResizer.classList.add("dragging");
+    els.panelResizer.setPointerCapture(e.pointerId);
+
+    const startY = e.clientY;
+    const logStart = els.traceLog.getBoundingClientRect().height;
+    const chartStart = els.opChart.getBoundingClientRect().height;
+
+    const onMove = (ev) => {
+      const dy = ev.clientY - startY;
+      const newLog = Math.max(60, logStart + dy);
+      const newChart = Math.max(60, chartStart - dy);
+      const sum = newLog + newChart;
+      els.traceLog.style.flex = `${newLog / sum}`;
+      els.opChart.style.flex = `${newChart / sum}`;
+    };
+
+    const onUp = () => {
+      els.panelResizer.classList.remove("dragging");
+      els.panelResizer.removeEventListener("pointermove", onMove);
+      els.panelResizer.removeEventListener("pointerup", onUp);
+    };
+
+    els.panelResizer.addEventListener("pointermove", onMove);
+    els.panelResizer.addEventListener("pointerup", onUp);
   });
 }

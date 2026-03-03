@@ -38,7 +38,7 @@ body {
 
 header {
   background: linear-gradient(135deg, var(--color-bg-panel) 0%, var(--color-bg-surface) 100%);
-  padding: 1rem 2rem;
+  padding: 0.5rem 1rem;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -148,10 +148,10 @@ canvas {
   background: var(--color-bg-panel);
   border: 2px solid var(--color-border);
   border-radius: 8px;
-  padding: 1.5rem;
+  padding: 1rem;
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 0.75rem;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
 }
 
@@ -285,6 +285,98 @@ canvas {
 .trace-entry.current {
   background: rgba(255, 152, 0, 0.25);
   border-left: 3px solid #ff9800;
+}
+
+.panel-resizer {
+  flex-shrink: 0;
+  height: 6px;
+  margin-top: -0.375rem;
+  margin-bottom: -0.375rem;
+  cursor: row-resize;
+  background: transparent;
+  position: relative;
+}
+
+.panel-resizer::after {
+  content: "";
+  position: absolute;
+  left: 25%;
+  right: 25%;
+  top: 2px;
+  height: 2px;
+  background: var(--color-border);
+  border-radius: 1px;
+}
+
+.panel-resizer:hover::after,
+.panel-resizer.dragging::after {
+  background: var(--color-accent);
+}
+
+.op-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0.5rem;
+  overflow-y: auto;
+  min-height: 60px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.op-chart-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 2px 4px;
+  border-radius: 3px;
+  transition: background 0.15s ease;
+}
+
+.op-chart-row.active {
+  background: rgba(255, 152, 0, 0.25);
+}
+
+.op-chart-label {
+  min-width: 60px;
+  color: var(--color-text-secondary);
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.op-chart-row.active .op-chart-label {
+  color: var(--color-text);
+  font-weight: 500;
+}
+
+.op-chart-bar-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.op-chart-bar {
+  height: 12px;
+  background: var(--color-accent);
+  border-radius: 2px;
+  min-width: 2px;
+  transition: opacity 0.15s ease;
+  opacity: 0.6;
+}
+
+.op-chart-row.active .op-chart-bar {
+  opacity: 1;
+  background: #ff9800;
+}
+
+.op-chart-count {
+  color: var(--color-text-muted);
+  font-size: 0.65rem;
+  flex-shrink: 0;
 }
 
 .code-content {

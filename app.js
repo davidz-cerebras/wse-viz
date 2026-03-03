@@ -42,6 +42,8 @@ function init() {
     iterationValue: document.getElementById("iterationValue"),
     stepValue: document.getElementById("stepValue"),
     operationValue: document.getElementById("operationValue"),
+    opChart: document.getElementById("opChart"),
+    panelResizer: document.getElementById("panelResizer"),
   };
 
   setGrid(GRID_ROWS, GRID_COLS);
@@ -170,8 +172,9 @@ function showPanel(panel) {
 function handleCanvasClick(e) {
   if (!getReplayState()) return;
   const rect = canvas.getBoundingClientRect();
-  const logicalX = (e.clientX - rect.left) * (canvas.width / rect.width) / canvasScale;
-  const logicalY = (e.clientY - rect.top) * (canvas.height / rect.height) / canvasScale;
+  const border = parseFloat(getComputedStyle(canvas).borderWidth) || 0;
+  const logicalX = (e.clientX - rect.left - border) * (canvas.width / (rect.width - 2 * border)) / canvasScale;
+  const logicalY = (e.clientY - rect.top - border) * (canvas.height / (rect.height - 2 * border)) / canvasScale;
 
   const col = Math.floor((logicalX - GAP) / (CELL_SIZE + GAP));
   const row = Math.floor((logicalY - GAP) / (CELL_SIZE + GAP));

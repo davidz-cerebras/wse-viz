@@ -12,8 +12,8 @@ const SYMBOLIC_OPS = {
   IMUL16: { symbol: "\u00d7", sub: "INT16" },
   SLL16:  { symbol: "\u00ab", sub: "INT16" },
   IMOV16: { symbol: "MOV", sub: "INT16" },
-  LD16:   { symbol: "LD", sub: "INT16" },
-  ST16:   { symbol: "ST", sub: "INT16" },
+  LD16:   { symbol: "LD" },
+  ST16:   { symbol: "ST" },
 };
 
 export class PE {
@@ -81,6 +81,12 @@ export class PE {
     ctx.fillStyle = `rgba(${45 + b * 55}, ${58 + b * 123}, ${90 + b * 156}, ${baseAlpha})`;
     ctx.fillRect(this.x, this.y, this.size, this.size);
 
+    if (b > PE_BRIGHTNESS_THRESHOLD && !this.selected) {
+      ctx.strokeStyle = `rgba(144, 202, 249, ${b * 0.8})`;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(this.x, this.y, this.size, this.size);
+    }
+
     if (this.selected) {
       ctx.strokeStyle = "#ff9800";
       ctx.lineWidth = 2;
@@ -88,10 +94,6 @@ export class PE {
     }
 
     if (b <= PE_BRIGHTNESS_THRESHOLD) return;
-
-    ctx.strokeStyle = `rgba(144, 202, 249, ${b * 0.8})`;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(this.x, this.y, this.size, this.size);
 
     if (!this.op) return;
 
@@ -104,15 +106,22 @@ export class PE {
     const entry = SYMBOLIC_OPS[baseOp];
     if (entry) {
       const isText = /^[A-Z]/.test(entry.symbol);
-      const symbolSize = isText ? this.size * 0.32 : this.size * 0.55;
-      ctx.font = `bold ${symbolSize}px sans-serif`;
-      ctx.textBaseline = "alphabetic";
-      ctx.fillText(entry.symbol, cx, cy + this.size * 0.05);
+      if (entry.sub) {
+        const symbolSize = isText ? this.size * 0.32 : this.size * 0.55;
+        ctx.font = `bold ${symbolSize}px sans-serif`;
+        ctx.textBaseline = "alphabetic";
+        ctx.fillText(entry.symbol, cx, cy + this.size * 0.05);
 
-      ctx.font = `${this.size * 0.2}px sans-serif`;
-      ctx.fillStyle = `rgba(200, 200, 255, ${b * 0.8})`;
-      ctx.textBaseline = "top";
-      ctx.fillText(entry.sub, cx, cy + this.size * 0.1);
+        ctx.font = `${this.size * 0.2}px sans-serif`;
+        ctx.fillStyle = `rgba(200, 200, 255, ${b * 0.8})`;
+        ctx.textBaseline = "top";
+        ctx.fillText(entry.sub, cx, cy + this.size * 0.1);
+      } else {
+        const symbolSize = isText ? this.size * 0.32 : this.size * 0.55;
+        ctx.font = `bold ${symbolSize}px sans-serif`;
+        ctx.textBaseline = "middle";
+        ctx.fillText(entry.symbol, cx, cy);
+      }
     } else {
       const fontSize = Math.min(this.size * 0.25, (this.size * 1.2) / this.op.length);
       ctx.font = `${fontSize}px sans-serif`;
