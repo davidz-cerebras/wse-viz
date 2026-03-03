@@ -96,21 +96,12 @@ header h1 {
 }
 
 .file-input-label {
-  padding: 0.5rem 1.5rem;
-  font-size: 0.9rem;
-  font-weight: 500;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.2s ease, transform 0.2s ease;
   background: linear-gradient(135deg, #ff9800, #f57c00);
-  color: var(--color-text);
   display: inline-block;
 }
 
 .file-input-label:hover {
   background: linear-gradient(135deg, #ffa726, #ff9800);
-  transform: translateY(-1px);
 }
 
 .cycle-display {
@@ -158,10 +149,14 @@ canvas {
   border: 2px solid var(--color-border);
   border-radius: 8px;
   padding: 1.5rem;
-  display: none;
+  display: flex;
   flex-direction: column;
   gap: 1.5rem;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+
+.hidden {
+  display: none !important;
 }
 
 .trace-panel {
@@ -177,7 +172,7 @@ canvas {
 }
 
 .playback-bar {
-  display: none;
+  display: flex;
   align-items: center;
   gap: 0.75rem;
   padding: 0.6rem 2rem;

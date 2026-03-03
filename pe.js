@@ -41,8 +41,8 @@ export class PE {
     this.op = isNop ? null : (op || null);
   }
 
-  activate() {
-    const now = performance.now();
+  activate(now) {
+    if (now === undefined) now = performance.now();
     this.active = true;
     this.activationTime = now;
     this.startBrightness = this.brightness;

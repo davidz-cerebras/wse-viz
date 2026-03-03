@@ -16,7 +16,7 @@
           <button id="spmvBtn" class="btn">SpMV</button>
           <button id="cgBtn" class="btn">Conjugate Gradient</button>
           <span class="controls-separator">|</span>
-          <label class="file-input-label" for="traceFileInput">
+          <label class="btn file-input-label" for="traceFileInput">
             Load Trace
             <input type="file" id="traceFileInput" accept=".log" hidden />
           </label>
@@ -26,7 +26,7 @@
         <div class="canvas-container">
           <canvas id="wseCanvas"></canvas>
         </div>
-        <div class="code-panel" id="cgPanel">
+        <div class="code-panel hidden" id="cgPanel">
           <h2>Conjugate Gradient Algorithm</h2>
           <div class="code-content">
             <div class="code-line" data-line="1">
@@ -88,12 +88,12 @@
             </div>
           </div>
         </div>
-        <div class="trace-panel" id="tracePanel">
+        <div class="trace-panel hidden" id="tracePanel">
           <h2>Trace Events</h2>
           <div id="traceLog" class="trace-log"></div>
         </div>
       </main>
-      <div class="playback-bar" id="playbackBar">
+      <div class="playback-bar hidden" id="playbackBar">
         <button id="playPauseBtn" class="icon-btn" title="Play/Pause">&#9654;</button>
         <input type="range" id="scrubBar" min="0" max="0" value="0" />
         <span id="cycleDisplay" class="cycle-display"></span>

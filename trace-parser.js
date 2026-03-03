@@ -150,6 +150,11 @@ export class TraceParser {
       length: len,
     };
 
+    // Pre-compute per-PE cycle arrays for binary search during seek
+    for (const [, events] of peStateIndex) {
+      events.cycleArray = new Float64Array(events.map(e => e.cycle));
+    }
+
     return {
       file,
       dimX,
