@@ -5,6 +5,7 @@ import {
   initReplay, setReplayGrid, getReplayState, getIsScrubbing,
   updateReplayTick, resumePlayback, togglePlayback, adjustSpeed,
   seekToCycle, cancelReplay, handleTraceFile, setupScrubListeners,
+  selectPE, deselectPE,
 } from "./replay-controller.js";
 import { GRID_ROWS, GRID_COLS, CELL_SIZE, GAP } from "./constants.js";
 
@@ -23,6 +24,7 @@ let canvas;
 let ctx;
 let simulationInterval;
 let els;
+let canvasScale = 1;
 
 function init() {
   canvas = document.getElementById("wseCanvas");
@@ -101,6 +103,7 @@ function setupEventListeners() {
     stopSimulation();
     handleTraceFile(e, setGrid);
   });
+  canvas.addEventListener("click", handleCanvasClick);
   setupScrubListeners();
   els.playPauseBtn.addEventListener("click", togglePlayback);
   document.getElementById("speedDown").addEventListener("click", () => adjustSpeed(0.5));
@@ -164,19 +167,47 @@ function showPanel(panel) {
   els.playbackBar.classList.toggle("hidden", panel !== "trace");
 }
 
+function handleCanvasClick(e) {
+  if (!getReplayState()) return;
+  const rect = canvas.getBoundingClientRect();
+  const logicalX = (e.clientX - rect.left) * (canvas.width / rect.width) / canvasScale;
+  const logicalY = (e.clientY - rect.top) * (canvas.height / rect.height) / canvasScale;
+
+  const col = Math.floor((logicalX - GAP) / (CELL_SIZE + GAP));
+  const row = Math.floor((logicalY - GAP) / (CELL_SIZE + GAP));
+
+  if (row < 0 || row >= grid.rows || col < 0 || col >= grid.cols) {
+    deselectPE();
+    return;
+  }
+
+  // Check click is within the PE cell, not in the gap
+  const peX = col * (CELL_SIZE + GAP) + GAP;
+  const peY = row * (CELL_SIZE + GAP) + GAP;
+  if (logicalX < peX || logicalX > peX + CELL_SIZE ||
+      logicalY < peY || logicalY > peY + CELL_SIZE) {
+    deselectPE();
+    return;
+  }
+
+  const traceX = col;
+  const traceY = grid.rows - 1 - row;
+  selectPE(row, col, traceX, traceY);
+}
+
 function setGrid(rows, cols) {
   if (grid) grid.cancel();
   grid = new Grid(rows, cols, CELL_SIZE, GAP);
   setReplayGrid(grid);
   const naturalWidth = cols * (CELL_SIZE + GAP) + GAP;
   const naturalHeight = rows * (CELL_SIZE + GAP) + GAP;
-  const scale = BASE_CANVAS_SIZE / Math.max(naturalWidth, naturalHeight);
-  canvas.width = Math.round(naturalWidth * scale);
-  canvas.height = Math.round(naturalHeight * scale);
+  canvasScale = BASE_CANVAS_SIZE / Math.max(naturalWidth, naturalHeight);
+  canvas.width = Math.round(naturalWidth * canvasScale);
+  canvas.height = Math.round(naturalHeight * canvasScale);
   // Reset inline styles so canvas renders at its attribute dimensions
   canvas.style.width = "";
   canvas.style.height = "";
-  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
 }
 
 document.addEventListener("DOMContentLoaded", init);

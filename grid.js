@@ -68,6 +68,16 @@ export class Grid {
     for (const pe of this.pes) pe.setBusy(false, null);
   }
 
+  selectPE(row, col) {
+    this.deselectAllPEs();
+    const pe = this.getPE(row, col);
+    if (pe) pe.selected = true;
+  }
+
+  deselectAllPEs() {
+    for (const pe of this.pes) pe.selected = false;
+  }
+
   clearPackets() {
     this.packets.length = 0;
   }

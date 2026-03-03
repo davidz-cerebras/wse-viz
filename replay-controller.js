@@ -18,6 +18,12 @@ let isScrubbing = false;
 let scrubWasPlaying = false;
 let handleTraceGeneration = 0;
 
+// PE selection state
+let selectedPE = null; // { row, col, traceX, traceY, minCycle, cycleStates }
+let peTraceWindowStart = 0; // first cycle rendered in the current DOM window
+let peTraceWindowSize = 0;  // number of entries currently in the DOM
+const PE_TRACE_WINDOW = 500; // max DOM entries rendered at once
+
 export function initReplay(deps) {
   grid = deps.grid;
   els = deps.els;
@@ -68,6 +74,7 @@ async function prefetchFrom(startCycle) {
 }
 
 function appendLandingEvents(cycle, events) {
+  if (selectedPE) return; // PE-specific trace is showing instead
   for (const evt of events.landings) {
     const entry = document.createElement("div");
     entry.className = "trace-entry trace-landing";
@@ -105,6 +112,148 @@ function applyCycleEvents(cycle, events, msPerCycle) {
   for (const evt of events.execChanges) {
     const { row, col } = TraceParser.toGridCoords(evt.x, evt.y, replay.traceData.dimY);
     grid.setPEBusy(row, col, evt.busy, evt.op);
+  }
+}
+
+export function selectPE(row, col, traceX, traceY) {
+  if (!replay.traceData || !replay.state) return;
+
+  // Toggle off if clicking the same PE
+  if (selectedPE && selectedPE.row === row && selectedPE.col === col) {
+    deselectPE();
+    return;
+  }
+
+  const key = `${traceX},${traceY}`;
+  const events = replay.traceData.peStateIndex.get(key) || [];
+
+  grid.deselectAllPEs();
+  grid.selectPE(row, col);
+
+  const { minCycle, maxCycle } = replay.state;
+  const totalCycles = maxCycle - minCycle + 1;
+
+  // Build flat per-cycle state array: cycleStates[i] = { busy, op } for cycle minCycle+i
+  // Uses compact parallel arrays to avoid object-per-cycle overhead
+  const busyArr = new Uint8Array(totalCycles); // 0=idle, 1=busy
+  const opArr = new Array(totalCycles).fill(null);
+  let evtIdx = 0;
+  let busy = false;
+  let op = null;
+  for (let i = 0; i < totalCycles; i++) {
+    const cycle = minCycle + i;
+    while (evtIdx < events.length && events[evtIdx].cycle <= cycle) {
+      busy = events[evtIdx].busy;
+      op = events[evtIdx].op;
+      evtIdx++;
+    }
+    if (busy) {
+      busyArr[i] = 1;
+      opArr[i] = op;
+    }
+  }
+
+  selectedPE = { row, col, traceX, traceY, minCycle, totalCycles, busyArr, opArr };
+
+  // Update panel header
+  els.tracePanel.querySelector("h2").textContent = `PE P${traceX}.${traceY} Trace`;
+
+  renderPETraceWindow(replay.state.currentCycle);
+  setupPETraceScroll();
+}
+
+function renderPETraceWindow(centerCycle) {
+  if (!selectedPE) return;
+  const { minCycle, totalCycles, busyArr, opArr } = selectedPE;
+
+  const centerIdx = Math.max(0, Math.min(centerCycle - minCycle, totalCycles - 1));
+  const halfWin = Math.floor(PE_TRACE_WINDOW / 2);
+  let startIdx = Math.max(0, centerIdx - halfWin);
+  let endIdx = Math.min(totalCycles, startIdx + PE_TRACE_WINDOW);
+  startIdx = Math.max(0, endIdx - PE_TRACE_WINDOW);
+
+  // Skip re-render if window hasn't changed
+  if (peTraceWindowStart === startIdx && peTraceWindowSize === endIdx - startIdx) {
+    updatePETraceHighlight();
+    return;
+  }
+
+  els.traceLog.innerHTML = "";
+  const frag = document.createDocumentFragment();
+
+  for (let i = startIdx; i < endIdx; i++) {
+    const cycle = minCycle + i;
+    const busy = busyArr[i];
+    const entry = document.createElement("div");
+    entry.className = busy ? "trace-entry trace-exec" : "trace-entry trace-idle";
+    entry.dataset.cycle = cycle;
+
+    const cycleSpan = document.createElement("span");
+    cycleSpan.className = "trace-cycle";
+    cycleSpan.textContent = `@${cycle}`;
+    entry.appendChild(cycleSpan);
+    entry.appendChild(document.createTextNode(busy ? ` EX ${opArr[i] || "?"}` : " IDLE"));
+
+    frag.appendChild(entry);
+  }
+  els.traceLog.appendChild(frag);
+
+  peTraceWindowStart = startIdx;
+  peTraceWindowSize = endIdx - startIdx;
+
+  updatePETraceHighlight();
+}
+
+function setupPETraceScroll() {
+  // Re-render window when user scrolls to edges
+  els.traceLog.onscroll = () => {
+    if (!selectedPE) return;
+    const log = els.traceLog;
+    const atTop = log.scrollTop < 40;
+    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+
+    if (atTop && peTraceWindowStart > 0) {
+      renderPETraceWindow(selectedPE.minCycle + peTraceWindowStart - 1);
+    } else if (atBottom && peTraceWindowStart + peTraceWindowSize < selectedPE.totalCycles) {
+      renderPETraceWindow(selectedPE.minCycle + peTraceWindowStart + peTraceWindowSize);
+    }
+  };
+}
+
+export function deselectPE() {
+  if (!selectedPE) return;
+  grid.deselectAllPEs();
+  selectedPE = null;
+  peTraceWindowStart = 0;
+  peTraceWindowSize = 0;
+  els.traceLog.onscroll = null;
+
+  // Restore panel header
+  els.tracePanel.querySelector("h2").textContent = "Trace Events";
+  els.traceLog.innerHTML = "";
+}
+
+function updatePETraceHighlight() {
+  if (!selectedPE || !replay.state) return;
+
+  const idx = replay.state.currentCycle - selectedPE.minCycle;
+  const localIdx = idx - peTraceWindowStart;
+
+  // Remove previous highlight
+  const prev = els.traceLog.querySelector(".trace-entry.current");
+  if (prev) prev.classList.remove("current");
+
+  // If current cycle is outside the rendered window, re-render around it
+  if (idx >= 0 && idx < selectedPE.totalCycles) {
+    if (localIdx < 0 || localIdx >= peTraceWindowSize) {
+      renderPETraceWindow(replay.state.currentCycle);
+      return; // renderPETraceWindow calls us recursively
+    }
+    const entries = els.traceLog.children;
+    if (localIdx < entries.length) {
+      entries[localIdx].classList.add("current");
+      entries[localIdx].scrollIntoView({ block: "nearest" });
+    }
   }
 }
 
@@ -166,6 +315,7 @@ export function updateReplayTick(timestamp) {
     }
   }
   updateScrubUI();
+  updatePETraceHighlight();
 
   if (advancedTo >= replay.state.maxCycle) {
     replay.state.playing = false;
@@ -237,10 +387,13 @@ export function seekToCycle(targetCycle) {
     }
   }
 
-  els.traceLog.innerHTML = "";
+  if (!selectedPE) {
+    els.traceLog.innerHTML = "";
+  }
   replay.state.currentCycle = targetCycle;
   replay.state.lastTickTime = performance.now();
   updateScrubUI();
+  updatePETraceHighlight();
 
   const gen = replay.generation;
   const idx = TraceParser.findCycleIndex(cycleIndex, targetCycle);
@@ -260,6 +413,7 @@ export function seekToCycle(targetCycle) {
 
 export function cancelReplay() {
   resetPrefetchState();
+  deselectPE();
   replay.state = null;
   isScrubbing = false;
   scrubWasPlaying = false;
@@ -277,6 +431,7 @@ export async function handleTraceFile(event, setGrid) {
   const traceData = await TraceParser.index(file);
   if (myGen !== handleTraceGeneration) return;
 
+  deselectPE();
   replay.traceData = traceData;
   setGrid(traceData.dimY, traceData.dimX);
   animationLoop.start();
@@ -307,7 +462,15 @@ export async function handleTraceFile(event, setGrid) {
   await prefetchFrom(minCycle);
 }
 
+function handleTraceLogClick(e) {
+  if (!selectedPE || !replay.state) return;
+  const entry = e.target.closest(".trace-entry");
+  if (!entry || !entry.dataset.cycle) return;
+  seekToCycle(parseInt(entry.dataset.cycle, 10));
+}
+
 export function setupScrubListeners() {
+  els.traceLog.addEventListener("click", handleTraceLogClick);
   els.scrubBar.addEventListener("pointerdown", () => {
     if (!replay.state || isScrubbing) return;
     isScrubbing = true;

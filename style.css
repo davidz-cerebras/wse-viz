@@ -263,6 +263,7 @@ canvas {
 .trace-entry {
   padding: 1px 4px;
   white-space: nowrap;
+  cursor: pointer;
 }
 
 .trace-cycle {
@@ -271,6 +272,19 @@ canvas {
 
 .trace-landing {
   color: #ffb74d;
+}
+
+.trace-exec {
+  color: #81c784;
+}
+
+.trace-idle {
+  color: #78909c;
+}
+
+.trace-entry.current {
+  background: rgba(255, 152, 0, 0.25);
+  border-left: 3px solid #ff9800;
 }
 
 .code-content {

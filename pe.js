@@ -30,6 +30,7 @@ export class PE {
     this.activationTime = 0;
     this.active = false;
     this.op = null;
+    this.selected = false;
   }
 
   setBusy(busy, op) {
@@ -79,6 +80,12 @@ export class PE {
 
     ctx.fillStyle = `rgba(${45 + b * 55}, ${58 + b * 123}, ${90 + b * 156}, ${baseAlpha})`;
     ctx.fillRect(this.x, this.y, this.size, this.size);
+
+    if (this.selected) {
+      ctx.strokeStyle = "#ff9800";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(this.x, this.y, this.size, this.size);
+    }
 
     if (b <= PE_BRIGHTNESS_THRESHOLD) return;
 
