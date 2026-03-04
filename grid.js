@@ -60,13 +60,21 @@ export class Grid {
     for (const pe of this.pes) pe.activate();
   }
 
-  setPEBusy(row, col, busy, op) {
+  setPEBusy(row, col, busy, op, stall) {
     const pe = this.getPE(row, col);
-    if (pe) pe.setBusy(busy, op);
+    if (pe) pe.setBusy(busy, op, stall);
+  }
+
+  setPEStall(row, col, stall) {
+    const pe = this.getPE(row, col);
+    if (pe) {
+      pe.stall = stall || null;
+      if (stall) pe.brightness = Math.max(pe.brightness, 0.25);
+    }
   }
 
   resetAllPEs() {
-    for (const pe of this.pes) pe.setBusy(false, null);
+    for (const pe of this.pes) pe.setBusy(false, null, null);
   }
 
   selectPE(row, col) {
@@ -206,23 +214,30 @@ export class Grid {
       const depCycle = cur.depCycle;
       const row = pkt.dimY - 1 - cur.y;
       const col = cur.x;
-      const key = row * this.cols + col;
+      const inBounds = row >= 0 && row < this.rows && col >= 0 && col < this.cols;
 
       if (depCycle !== null && fc < depCycle) {
-        // Phase 1: crossing PE — on-ramp arriving, off-ramp departing
-        if (cur.arriveDir && cur.arriveDir !== "R") active.add(`${key},${cur.arriveDir},on`);
-        if (cur.departDir) active.add(`${key},${cur.departDir},off`);
+        if (inBounds) {
+          const key = row * this.cols + col;
+          if (cur.arriveDir && cur.arriveDir !== "R") active.add(`${key},${cur.arriveDir},on`);
+          if (cur.departDir) active.add(`${key},${cur.departDir},off`);
+        }
       } else if (depCycle !== null && wpIdx < wp.length - 1) {
-        // Phase 2: in transit — off-ramp at source, on-ramp at dest
+        if (inBounds && cur.departDir) {
+          active.add(`${row * this.cols + col},${cur.departDir},off`);
+        }
         const next = wp[wpIdx + 1];
-        if (cur.departDir) active.add(`${key},${cur.departDir},off`);
         const nextRow = pkt.dimY - 1 - next.y;
         const nextCol = next.x;
-        const nextKey = nextRow * this.cols + nextCol;
-        if (next.arriveDir && next.arriveDir !== "R") active.add(`${nextKey},${next.arriveDir},on`);
+        if (nextRow >= 0 && nextRow < this.rows && nextCol >= 0 && nextCol < this.cols) {
+          if (next.arriveDir && next.arriveDir !== "R") {
+            active.add(`${nextRow * this.cols + nextCol},${next.arriveDir},on`);
+          }
+        }
       } else {
-        // Phase 3: resting at destination
-        if (cur.arriveDir && cur.arriveDir !== "R") active.add(`${key},${cur.arriveDir},on`);
+        if (inBounds && cur.arriveDir && cur.arriveDir !== "R") {
+          active.add(`${row * this.cols + col},${cur.arriveDir},on`);
+        }
       }
     }
     return active;

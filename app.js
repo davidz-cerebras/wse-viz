@@ -238,8 +238,8 @@ function resizeCanvas() {
     canvasScale = displayW / gridNaturalWidth;
     canvas.width = newW;
     canvas.height = newH;
-    canvas.style.width = `${Math.round(displayW)}px`;
-    canvas.style.height = `${Math.round(displayH)}px`;
+    canvas.style.width = `${newW}px`;
+    canvas.style.height = `${newH}px`;
     ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
     // Draw immediately so the canvas is never left blank after resize.
     // Can't rely on the animation loop because update() may auto-stop

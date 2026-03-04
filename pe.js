@@ -31,15 +31,17 @@ export class PE {
     this.active = false;
     this.op = null;
     this.selected = false;
+    this.stall = null; // null, "wavelet", or future: "pipeline"
   }
 
-  setBusy(busy, op) {
+  setBusy(busy, op, stall) {
     const isNop = op === "NOP";
-    this.brightness = (busy && !isNop) ? 1 : 0;
+    this.brightness = (busy && !isNop) ? 1 : (stall ? 0.25 : 0);
     this.targetBrightness = this.brightness;
     this.transitionDuration = 0;
     this.active = false;
     this.op = isNop ? null : (op || null);
+    this.stall = stall || null;
   }
 
   activate(now) {
@@ -78,14 +80,14 @@ export class PE {
     const b = this.brightness;
     const baseAlpha = 0.3 + b * 0.7;
 
-    ctx.fillStyle = `rgba(${45 + b * 55}, ${58 + b * 123}, ${90 + b * 156}, ${baseAlpha})`;
-    ctx.fillRect(this.x, this.y, this.size, this.size);
-
-    if (b > PE_BRIGHTNESS_THRESHOLD && !this.selected) {
-      ctx.strokeStyle = `rgba(144, 202, 249, ${b * 0.8})`;
-      ctx.lineWidth = 2;
-      ctx.strokeRect(this.x, this.y, this.size, this.size);
+    if (this.stall && !this.op) {
+      // Stalled and not executing: dark purple tint
+      ctx.fillStyle = `rgba(${40 + b * 60}, ${20 + b * 20}, ${50 + b * 80}, ${baseAlpha})`;
+    } else {
+      // Normal (executing or idle): blue tint
+      ctx.fillStyle = `rgba(${45 + b * 55}, ${58 + b * 123}, ${90 + b * 156}, ${baseAlpha})`;
     }
+    ctx.fillRect(this.x, this.y, this.size, this.size);
 
     if (this.selected) {
       ctx.strokeStyle = "#ff9800";

@@ -267,10 +267,14 @@ canvas {
   padding: 1px 4px;
   white-space: nowrap;
   cursor: pointer;
+  border-left: 3px solid transparent;
 }
 
 .trace-cycle {
   color: var(--color-text-muted);
+  display: inline-block;
+  min-width: 45px;
+  text-align: right;
 }
 
 .trace-landing {
@@ -283,6 +287,25 @@ canvas {
 
 .trace-idle {
   color: #78909c;
+}
+
+.trace-stall {
+  color: #ef5350;
+}
+
+.trace-pipeline {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.trace-pipe-stage {
+  min-width: 70px;
+  text-align: left;
+}
+
+.trace-pipe-empty {
+  color: var(--color-text-muted);
+  opacity: 0.4;
 }
 
 .trace-entry.current {
@@ -323,6 +346,7 @@ canvas {
   padding: 0.5rem;
   overflow-y: auto;
   min-height: 60px;
+  flex: 0 0 auto; /* size to content by default; overridden by resizer */
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border);
   border-radius: 6px;
