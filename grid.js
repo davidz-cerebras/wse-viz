@@ -1,5 +1,6 @@
 import { PE } from "./pe.js";
 import { DataPacket } from "./packet.js";
+import { CELL_SIZE, RAMP_ARROW_DEPTH, RAMP_LATERAL, RAMP_ARROW_SIZE } from "./constants.js";
 
 export class Grid {
   constructor(rows, cols, cellSize, gap) {
@@ -110,7 +111,121 @@ export class Grid {
 
   draw(ctx, now) {
     for (const pe of this.pes) pe.draw(ctx);
+    this.drawRamps(ctx);
     for (const packet of this.packets) packet.draw(ctx, now, this);
+  }
+
+  drawRamps(ctx) {
+    const depth = RAMP_ARROW_DEPTH;
+    const lat = RAMP_LATERAL;
+    const arrowSize = RAMP_ARROW_SIZE;
+
+    // Collect active ramps from TracedPackets
+    const activeRamps = this._collectActiveRamps();
+
+    for (let row = 0; row < this.rows; row++) {
+      for (let col = 0; col < this.cols; col++) {
+        const pe = this.getPE(row, col);
+        if (!pe) continue;
+        const cx = pe.x + CELL_SIZE / 2;
+        const cy = pe.y + CELL_SIZE / 2;
+        const key = row * this.cols + col;
+
+        // Each direction has an on-ramp (arriving) and off-ramp (departing)
+        // Off-ramp arrow points away from PE; on-ramp arrow points toward PE
+
+        // E side (screen right)
+        this._drawRamp(ctx, cx + depth, cy - lat, arrowSize, "E", false, activeRamps.has(`${key},E,off`));
+        this._drawRamp(ctx, cx + depth, cy + lat, arrowSize, "E", true, activeRamps.has(`${key},E,on`));
+
+        // W side (screen left)
+        this._drawRamp(ctx, cx - depth, cy + lat, arrowSize, "W", false, activeRamps.has(`${key},W,off`));
+        this._drawRamp(ctx, cx - depth, cy - lat, arrowSize, "W", true, activeRamps.has(`${key},W,on`));
+
+        // N side (screen down — trace N = y-1 = lower on screen)
+        this._drawRamp(ctx, cx - lat, cy + depth, arrowSize, "N", false, activeRamps.has(`${key},N,off`));
+        this._drawRamp(ctx, cx + lat, cy + depth, arrowSize, "N", true, activeRamps.has(`${key},N,on`));
+
+        // S side (screen up — trace S = y+1 = higher on screen)
+        this._drawRamp(ctx, cx + lat, cy - depth, arrowSize, "S", false, activeRamps.has(`${key},S,off`));
+        this._drawRamp(ctx, cx - lat, cy - depth, arrowSize, "S", true, activeRamps.has(`${key},S,on`));
+      }
+    }
+  }
+
+  _drawRamp(ctx, x, y, size, dir, isOnRamp, active) {
+    // Arrow pointing toward PE (on-ramp) or away from PE (off-ramp)
+    // Screen directions: E=right, W=left, N=down, S=up
+    const alpha = active ? 0.9 : 0.15;
+    ctx.fillStyle = isOnRamp
+      ? `rgba(100, 181, 246, ${alpha})`   // blue for on-ramp
+      : `rgba(255, 152, 0, ${alpha})`;     // orange for off-ramp
+
+    // Arrow direction: on-ramp points inward (toward PE), off-ramp points outward
+    let dx = 0, dy = 0;
+    switch (dir) {
+      case "E": dx = isOnRamp ? -1 : 1; break;
+      case "W": dx = isOnRamp ? 1 : -1; break;
+      case "N": dy = isOnRamp ? -1 : 1; break; // N = screen down, inward = up (-Y)
+      case "S": dy = isOnRamp ? 1 : -1; break; // S = screen up, inward = down (+Y)
+    }
+
+    // Draw a small triangle pointing in (dx, dy) direction
+    ctx.beginPath();
+    if (dx !== 0) {
+      // Horizontal arrow
+      ctx.moveTo(x + dx * size, y);
+      ctx.lineTo(x - dx * size, y - size);
+      ctx.lineTo(x - dx * size, y + size);
+    } else {
+      // Vertical arrow
+      ctx.moveTo(x, y + dy * size);
+      ctx.lineTo(x - size, y - dy * size);
+      ctx.lineTo(x + size, y - dy * size);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  _collectActiveRamps() {
+    // Returns a Set of "peKey,dir,on|off" strings for ramps currently in use
+    const active = new Set();
+    for (const pkt of this.packets) {
+      if (!pkt.waypoints || !pkt.visible) continue;
+
+      const wp = pkt.waypoints;
+      const fc = pkt.fractionalCycle;
+      // Find current waypoint
+      let wpIdx = 0;
+      for (let i = 1; i < wp.length; i++) {
+        if (wp[i].cycle > fc) break;
+        wpIdx = i;
+      }
+
+      const cur = wp[wpIdx];
+      const depCycle = cur.depCycle;
+      const row = pkt.dimY - 1 - cur.y;
+      const col = cur.x;
+      const key = row * this.cols + col;
+
+      if (depCycle !== null && fc < depCycle) {
+        // Phase 1: crossing PE — on-ramp arriving, off-ramp departing
+        if (cur.arriveDir && cur.arriveDir !== "R") active.add(`${key},${cur.arriveDir},on`);
+        if (cur.departDir) active.add(`${key},${cur.departDir},off`);
+      } else if (depCycle !== null && wpIdx < wp.length - 1) {
+        // Phase 2: in transit — off-ramp at source, on-ramp at dest
+        const next = wp[wpIdx + 1];
+        if (cur.departDir) active.add(`${key},${cur.departDir},off`);
+        const nextRow = pkt.dimY - 1 - next.y;
+        const nextCol = next.x;
+        const nextKey = nextRow * this.cols + nextCol;
+        if (next.arriveDir && next.arriveDir !== "R") active.add(`${nextKey},${next.arriveDir},on`);
+      } else {
+        // Phase 3: resting at destination
+        if (cur.arriveDir && cur.arriveDir !== "R") active.add(`${key},${cur.arriveDir},on`);
+      }
+    }
+    return active;
   }
 
   hasActivity() {

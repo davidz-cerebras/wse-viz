@@ -1,0 +1,268 @@
+import { drawPacketDot } from "./draw-utils.js";
+import { CELL_SIZE, RAMP_DEPTH, RAMP_LATERAL } from "./constants.js";
+
+// Direction → trace coordinate delta
+const DIR_DELTA = { E: [1, 0], W: [-1, 0], N: [0, -1], S: [0, 1] };
+
+// Direction → opposite (for computing arrival direction at destination)
+const DIR_OPPOSITE = { E: "W", W: "E", N: "S", S: "N" };
+
+/**
+ * Extracts linear branches from a TracedWavelet's hop list.
+ * Each branch waypoint includes arrival/departure info for ramp positioning.
+ */
+export function extractBranches(wavelet) {
+  const { hops } = wavelet;
+  if (hops.length === 0) return [];
+
+  const hopsByPos = new Map();
+  for (const hop of hops) {
+    const key = `${hop.cycle},${hop.x},${hop.y}`;
+    if (!hopsByPos.has(key)) hopsByPos.set(key, []);
+    hopsByPos.get(key).push(hop);
+  }
+
+  const branches = [];
+
+  function getDepartures(cycle, x, y) {
+    const hereHops = hopsByPos.get(`${cycle},${x},${y}`) || [];
+    for (const h of hereHops) {
+      if (h.departing.length > 0) return { dirs: h.departing, depCycle: h.cycle };
+    }
+    for (let dc = 1; dc <= 3; dc++) {
+      const futureHops = hopsByPos.get(`${cycle + dc},${x},${y}`) || [];
+      for (const h of futureHops) {
+        if (h.landing === "-" && h.departing.length > 0) {
+          return { dirs: h.departing, depCycle: h.cycle };
+        }
+      }
+    }
+    return null;
+  }
+
+  function getLandingDir(cycle, x, y) {
+    const hereHops = hopsByPos.get(`${cycle},${x},${y}`) || [];
+    for (const h of hereHops) {
+      if (h.landing !== "-") return h.landing;
+    }
+    return null;
+  }
+
+  function traceBranch(startCycle, startX, startY, arriveDir) {
+    const waypoints = [{ cycle: startCycle, x: startX, y: startY, arriveDir, departDir: null, depCycle: null }];
+    let cx = startX, cy = startY, cc = startCycle;
+    continueTrace(waypoints, cx, cy, cc);
+  }
+
+  function continueTrace(waypoints, cx, cy, cc) {
+
+    for (;;) {
+      const dep = getDepartures(cc, cx, cy);
+      if (!dep) break;
+
+      const fromX = cx, fromY = cy;
+      let followed = false;
+
+      for (const dir of dep.dirs) {
+        const d = DIR_DELTA[dir];
+        if (!d) continue;
+        const nx = fromX + d[0], ny = fromY + d[1];
+        const nc = dep.depCycle + 1;
+
+        if (!followed) {
+          // Record departure on the current waypoint
+          waypoints[waypoints.length - 1].departDir = dir;
+          waypoints[waypoints.length - 1].depCycle = dep.depCycle;
+          // Add arrival at the next PE
+          const nextArriveDir = getLandingDir(nc, nx, ny) || DIR_OPPOSITE[dir];
+          waypoints.push({ cycle: nc, x: nx, y: ny, arriveDir: nextArriveDir, departDir: null, depCycle: null });
+          cx = nx; cy = ny; cc = nc;
+          followed = true;
+        } else {
+          // Fork: the wavelet splits here. The fork branch starts at the
+          // same on-ramp as the parent (using the parent's arriveDir), then
+          // crosses to this fork's off-ramp direction. This makes the packet
+          // visually diverge from the parent — one dot becomes two.
+          // The fork PE is the second-to-last waypoint (the last one is the next PE
+          // that was just pushed for the main branch's first direction)
+          const forkPeWp = waypoints[waypoints.length - 2];
+          const parentArriveDir = forkPeWp.arriveDir;
+          const nextArriveDir = getLandingDir(dep.depCycle + 1, fromX + d[0], fromY + d[1]) || DIR_OPPOSITE[dir];
+          const forkCrossingStart = forkPeWp.cycle;
+          const forkStart = {
+            cycle: forkCrossingStart, x: fromX, y: fromY,
+            arriveDir: parentArriveDir, departDir: dir, depCycle: dep.depCycle,
+          };
+          const forkDest = {
+            cycle: dep.depCycle + 1, x: fromX + d[0], y: fromY + d[1],
+            arriveDir: nextArriveDir, departDir: null, depCycle: null,
+          };
+          continueTrace([forkStart, forkDest], fromX + d[0], fromY + d[1], dep.depCycle + 1);
+        }
+      }
+
+      if (!followed) break;
+    }
+
+    if (waypoints.length > 1) {
+      branches.push(waypoints);
+    }
+  }
+
+  const first = hops[0];
+  traceBranch(first.cycle, first.x, first.y, first.landing);
+
+  return branches;
+}
+
+// Ramp positions in the gap around a PE.
+//
+// Trace → screen coordinate mapping (Y-axis flipped):
+//   trace N (y-1) → screen down, trace S (y+1) → screen up
+//   trace E (x+1) → screen right, trace W (x-1) → screen left
+//
+// Lateral offsets separate on-ramps from off-ramps:
+//   N: off-ramp left (-X), on-ramp right (+X)
+//   S: on-ramp left (-X), off-ramp right (+X)
+//   E: off-ramp above (-Y), on-ramp below (+Y)
+//   W: on-ramp above (-Y), off-ramp below (+Y)
+
+function onRampPos(grid, x, y, dimY, dir) {
+  return _rampPos(grid, x, y, dimY, dir, true);
+}
+
+function offRampPos(grid, x, y, dimY, dir) {
+  return _rampPos(grid, x, y, dimY, dir, false);
+}
+
+function _rampPos(grid, x, y, dimY, dir, isOnRamp) {
+  const row = dimY - 1 - y;
+  const col = x;
+  const pe = grid.getPE(row, col);
+  if (!pe) return null;
+
+  const cx = pe.x + CELL_SIZE / 2;
+  const cy = pe.y + CELL_SIZE / 2;
+
+  if (!dir || dir === "R") return { x: cx, y: cy };
+
+  // lat: lateral offset sign. Positive = right/down in screen coords.
+  // Per user spec:
+  //   N off-ramp: left (-X), N on-ramp: right (+X)
+  //   S on-ramp: left (-X), S off-ramp: right (+X)
+  //   E off-ramp: above (-Y), E on-ramp: below (+Y)
+  //   W on-ramp: above (-Y), W off-ramp: below (+Y)
+  const lat = RAMP_LATERAL;
+
+  switch (dir) {
+    case "E": // screen right; lateral = screen Y axis
+      return { x: cx + RAMP_DEPTH, y: cy + (isOnRamp ? lat : -lat) };
+    case "W": // screen left; lateral = screen Y axis
+      return { x: cx - RAMP_DEPTH, y: cy + (isOnRamp ? -lat : lat) };
+    case "N": // screen DOWN (trace y-1 = grid row+1 = screen lower)
+      return { x: cx + (isOnRamp ? lat : -lat), y: cy + RAMP_DEPTH };
+    case "S": // screen UP (trace y+1 = grid row-1 = screen higher)
+      return { x: cx + (isOnRamp ? -lat : lat), y: cy - RAMP_DEPTH };
+    default:
+      return { x: cx, y: cy };
+  }
+}
+
+/**
+ * TracedPacket animates a wavelet along a single branch.
+ * Position is driven by the replay cycle counter.
+ *
+ * Within each PE visit, the wavelet goes through phases:
+ *   1. Arrive at on-ramp (arrival cycle)
+ *   2. Cross through PE center to off-ramp (between arrival and departure cycles)
+ *   3. Transit to next PE's on-ramp (departure cycle to next arrival cycle)
+ *
+ * Between integer cycles the position is interpolated for smooth animation.
+ */
+export class TracedPacket {
+  constructor(waypoints, dimY) {
+    this.waypoints = waypoints;
+    this.dimY = dimY;
+    this.startCycle = waypoints[0].cycle;
+    this.endCycle = waypoints[waypoints.length - 1].cycle;
+    this.currentCycle = this.startCycle;
+    this.fractionalCycle = this.startCycle;
+    this.done = false;
+    this.visible = false;
+  }
+
+  setCycle(cycle) {
+    this.currentCycle = cycle;
+    this.done = cycle > this.endCycle;
+    this.visible = cycle >= this.startCycle;
+  }
+
+  /** Set a fractional cycle for smooth sub-cycle animation */
+  setFractionalCycle(fc) {
+    this.fractionalCycle = fc;
+  }
+
+  getCurrentPosition(_currentTime, grid) {
+    const fc = this.fractionalCycle;
+
+    // Find which waypoint we're at or between
+    let wpIdx = 0;
+    for (let i = 1; i < this.waypoints.length; i++) {
+      if (this.waypoints[i].cycle > fc) break;
+      wpIdx = i;
+    }
+
+    const wp = this.waypoints[wpIdx];
+    const nextWp = wpIdx < this.waypoints.length - 1 ? this.waypoints[wpIdx + 1] : null;
+    const depCycle = wp.depCycle;
+
+    const dimY = this.dimY;
+
+    // Phase 1: Arriving at on-ramp → crossing to off-ramp
+    if (depCycle !== null && fc < depCycle) {
+      const from = onRampPos(grid, wp.x, wp.y, dimY, wp.arriveDir);
+      const to = offRampPos(grid, wp.x, wp.y, dimY, wp.departDir);
+      if (!from || !to) return null;
+
+      const span = depCycle - wp.cycle;
+      if (span <= 0) return from;
+      const t = (fc - wp.cycle) / span;
+      return {
+        x: from.x + (to.x - from.x) * t,
+        y: from.y + (to.y - from.y) * t,
+      };
+    }
+
+    // Phase 2: Departing off-ramp → transiting to next PE's on-ramp
+    if (nextWp && depCycle !== null && fc >= depCycle && fc < nextWp.cycle) {
+      const from = offRampPos(grid, wp.x, wp.y, dimY, wp.departDir);
+      const to = onRampPos(grid, nextWp.x, nextWp.y, dimY, nextWp.arriveDir);
+      if (!from || !to) return null;
+
+      const span = nextWp.cycle - depCycle;
+      if (span <= 0) return from;
+      const t = (fc - depCycle) / span;
+      return {
+        x: from.x + (to.x - from.x) * t,
+        y: from.y + (to.y - from.y) * t,
+      };
+    }
+
+    // Phase 3: Sitting at final destination on-ramp or off-ramp
+    if (wp.departDir) {
+      return offRampPos(grid, wp.x, wp.y, dimY, wp.departDir);
+    }
+    return onRampPos(grid, wp.x, wp.y, dimY, wp.arriveDir);
+  }
+
+  isComplete(_currentTime) {
+    return this.done;
+  }
+
+  draw(ctx, currentTime, grid) {
+    if (!this.visible) return;
+    const pos = this.getCurrentPosition(currentTime, grid);
+    if (!pos) return;
+    drawPacketDot(ctx, pos.x, pos.y);
+  }
+}

@@ -2,11 +2,16 @@ const landingRegex =
   /^@(\d+) P(\d+)\.(\d+) \(\w+\) landing C(\d+) from link ([WESNR]),/;
 const exOpRegex = /^@(\d+) P(\d+)\.(\d+):.*\[EX OP\]/;
 const opcodeRegex = /T\d+(?:\.\w+)?\s+(\S+)/;
+const waveletRegex =
+  /^@(\d+) P(\d+)\.(\d+) \(\w+\) wavelet C(\d+) ctrl=(\d), idx=([0-9a-fA-F]+), data=([0-9a-fA-F]+) \([^)]*\([^)]*\)\), half=(\d), ident=([0-9a-fA-F]+) landing=([RENWSD-]) departing=\/(.{5})\//;
 
 function parseLanding(line) {
   if (!line.includes(") landing C")) return null;
   const m = line.match(landingRegex);
-  if (!m) return null;
+  if (!m) {
+    console.warn("Trace parse failure: landing line did not match regex:", line.substring(0, 120));
+    return null;
+  }
   return {
     cycle: parseInt(m[1]),
     x: parseInt(m[2]),
@@ -19,7 +24,10 @@ function parseLanding(line) {
 function parseExOp(line) {
   if (!line.includes("[EX OP]")) return null;
   const m = line.match(exOpRegex);
-  if (!m) return null;
+  if (!m) {
+    console.warn("Trace parse failure: EX OP line did not match regex:", line.substring(0, 120));
+    return null;
+  }
   const busy = !line.includes("[EX OP] IDLE");
   let op = null;
   if (busy) {
@@ -36,6 +44,42 @@ function parseExOp(line) {
   };
 }
 
+function parseWavelet(line) {
+  if (!line.includes(") wavelet C")) return null;
+  const m = line.match(waveletRegex);
+  if (!m) {
+    console.warn("Trace parse failure: wavelet line did not match regex:", line.substring(0, 120));
+    return null;
+  }
+
+  // Parse departing directions from 5-slot field: E,N,W,S,_
+  const depStr = m[11];
+  const departing = [];
+  if (depStr[0] !== " ") departing.push("E");
+  if (depStr[1] !== " ") departing.push("N");
+  if (depStr[2] !== " ") departing.push("W");
+  if (depStr[3] !== " ") departing.push("S");
+  // depStr[4] is unused/reserved
+
+  return {
+    cycle: parseInt(m[1]),
+    x: parseInt(m[2]),
+    y: parseInt(m[3]),
+    color: parseInt(m[4]),
+    ctrl: m[5] === "1",
+    idx: m[6],
+    data: m[7],
+    half: m[8] === "1",
+    ident: m[9],
+    landing: m[10],
+    departing,
+    colorswap: line.includes("colorswap from C") ? parseInt(line.match(/colorswap from C(\d+)/)[1]) : null,
+    lf: line.includes(", lf=1"),
+    noCe: line.includes("no_ce"),
+    toCe: line.includes("to_ce_from_q"),
+  };
+}
+
 export class TraceParser {
   static async index(file) {
     let dimX = 0;
@@ -47,6 +91,9 @@ export class TraceParser {
     const dimRegex = /^@\d+ dimX=(\d+), dimY=(\d+)/;
     const prevState = new Map();
     const peStateIndex = new Map();
+    const waveletIndex = new Map();   // ident → { ident, color, ctrl, hops: [] }
+    const waveletsByCycle = new Map(); // cycle → [ident, ident, ...]
+    let hasWaveletData = false;
 
     const tmpCycles = [];
     const tmpStarts = [];
@@ -88,20 +135,54 @@ export class TraceParser {
         if (landing.cycle > maxCycle) maxCycle = landing.cycle;
         totalEvents++;
         hasEvents = true;
-      } else {
-        const ex = parseExOp(line);
-        if (ex) {
-          const key = `${ex.x},${ex.y}`;
-          const state = ex.busy ? `1:${ex.op}` : "0";
-          if (prevState.get(key) !== state) {
-            prevState.set(key, state);
-            if (!peStateIndex.has(key)) peStateIndex.set(key, []);
-            peStateIndex.get(key).push({ cycle: ex.cycle, busy: ex.busy, op: ex.op });
-            if (ex.cycle < minCycle) minCycle = ex.cycle;
-            if (ex.cycle > maxCycle) maxCycle = ex.cycle;
-          }
-          hasEvents = true;
+        return;
+      }
+
+      const wv = parseWavelet(line);
+      if (wv) {
+        hasWaveletData = true;
+        hasEvents = true;
+        totalEvents++;
+
+        // Determine if this hop is consumed (delivered to compute element)
+        wv.consumed = wv.toCe || (wv.landing !== "-" && wv.departing.length === 0 && !wv.noCe);
+
+        let entry = waveletIndex.get(wv.ident);
+        if (!entry) {
+          entry = { ident: wv.ident, color: wv.color, ctrl: wv.ctrl, hops: [] };
+          waveletIndex.set(wv.ident, entry);
         }
+        entry.hops.push({
+          cycle: wv.cycle, x: wv.x, y: wv.y,
+          landing: wv.landing, departing: wv.departing,
+          consumed: wv.consumed, noCe: wv.noCe, toCe: wv.toCe,
+          colorswap: wv.colorswap, lf: wv.lf,
+          idx: wv.idx, data: wv.data, half: wv.half,
+        });
+
+        // Track which cycle each wavelet first appears (emission cycle)
+        if (entry.hops.length === 1) {
+          if (!waveletsByCycle.has(wv.cycle)) waveletsByCycle.set(wv.cycle, []);
+          waveletsByCycle.get(wv.cycle).push(wv.ident);
+        }
+
+        if (wv.cycle < minCycle) minCycle = wv.cycle;
+        if (wv.cycle > maxCycle) maxCycle = wv.cycle;
+        return;
+      }
+
+      const ex = parseExOp(line);
+      if (ex) {
+        const key = `${ex.x},${ex.y}`;
+        const state = ex.busy ? `1:${ex.op}` : "0";
+        if (prevState.get(key) !== state) {
+          prevState.set(key, state);
+          if (!peStateIndex.has(key)) peStateIndex.set(key, []);
+          peStateIndex.get(key).push({ cycle: ex.cycle, busy: ex.busy, op: ex.op });
+          if (ex.cycle < minCycle) minCycle = ex.cycle;
+          if (ex.cycle > maxCycle) maxCycle = ex.cycle;
+        }
+        hasEvents = true;
       }
     };
 
@@ -161,6 +242,9 @@ export class TraceParser {
       dimY,
       cycleIndex,
       peStateIndex,
+      waveletIndex,
+      waveletsByCycle,
+      hasWaveletData,
       minCycle,
       maxCycle,
       totalEvents,

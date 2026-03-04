@@ -1,8 +1,5 @@
 import { MultiHopPacket, buildManhattanPath } from "./multihop-packet.js";
-import { HOP_DELAY } from "./constants.js";
-
-// Delay between animation phases in demo algorithms (ms)
-const STEP_DELAY = 150;
+import { HOP_DELAY, STEP_DELAY } from "./constants.js";
 
 const CG_STEPS = [
   { name: "SpMV: Ap = A \u00d7 p", type: "spmv", line: 4 },

@@ -1,7 +1,6 @@
 import { TraceParser } from "./trace-parser.js";
-
-const PREFETCH_SIZE = 100;
-const MAX_LOG_ENTRIES = 500;
+import { extractBranches, TracedPacket } from "./wavelet.js";
+import { PREFETCH_SIZE, MAX_PREFETCH_BYTES, MAX_LOG_ENTRIES, PE_TRACE_WINDOW } from "./constants.js";
 
 let grid, els, animationLoop, showPanel;
 
@@ -23,7 +22,6 @@ let selectedPE = null; // { row, col, traceX, traceY, minCycle, cycleStates }
 let peTraceWindowStart = 0; // first cycle rendered in the current DOM window
 let peTraceWindowSize = 0;  // number of entries currently in the DOM
 let peTraceScrollLock = false; // prevents scroll-handler re-entrancy
-const PE_TRACE_WINDOW = 500; // max DOM entries rendered at once
 
 export function initReplay(deps) {
   grid = deps.grid;
@@ -56,7 +54,13 @@ async function prefetchFrom(startCycle) {
   const { cycleIndex } = replay.traceData;
   const startIdx = TraceParser.findCycleIndexGE(cycleIndex, startCycle);
   if (startIdx >= cycleIndex.length) return;
-  const endIdx = Math.min(startIdx + PREFETCH_SIZE - 1, cycleIndex.length - 1);
+  let endIdx = Math.min(startIdx + PREFETCH_SIZE - 1, cycleIndex.length - 1);
+
+  // Cap prefetch size to avoid loading multi-MB blobs from verbose traces
+  const { starts, ends } = cycleIndex;
+  while (endIdx > startIdx && ends[endIdx] - starts[startIdx] > MAX_PREFETCH_BYTES) {
+    endIdx--;
+  }
 
   const gen = replay.generation;
   replay.prefetchInFlight = true;
@@ -94,6 +98,21 @@ function appendLandingEvents(cycle, events) {
   els.traceLog.scrollTop = els.traceLog.scrollHeight;
 }
 
+function getBranches(wv) {
+  if (!wv._branches) wv._branches = extractBranches(wv);
+  return wv._branches;
+}
+
+function syncTracedPackets(cycle, fraction) {
+  const fc = cycle + (fraction || 0);
+  for (const pkt of grid.packets) {
+    if (pkt instanceof TracedPacket) {
+      pkt.setCycle(cycle);
+      pkt.setFractionalCycle(fc);
+    }
+  }
+}
+
 function sendLandingPackets(events, msPerCycle, startTime) {
   const dimY = replay.traceData.dimY;
   for (const evt of events.landings) {
@@ -108,10 +127,27 @@ function sendLandingPackets(events, msPerCycle, startTime) {
 
 function applyCycleEvents(cycle, events, msPerCycle) {
   appendLandingEvents(cycle, events);
-  sendLandingPackets(events, msPerCycle);
+
+  const td = replay.traceData;
+  if (td.hasWaveletData) {
+    // Create TracedPackets for wavelets that start at this cycle
+    const idents = td.waveletsByCycle.get(cycle);
+    if (idents) {
+      for (const ident of idents) {
+        const wv = td.waveletIndex.get(ident);
+        if (!wv) continue;
+        const branches = getBranches(wv);
+        for (const waypoints of branches) {
+          grid.packets.push(new TracedPacket(waypoints, td.dimY));
+        }
+      }
+    }
+  } else {
+    sendLandingPackets(events, msPerCycle);
+  }
 
   for (const evt of events.execChanges) {
-    const { row, col } = TraceParser.toGridCoords(evt.x, evt.y, replay.traceData.dimY);
+    const { row, col } = TraceParser.toGridCoords(evt.x, evt.y, td.dimY);
     grid.setPEBusy(row, col, evt.busy, evt.op);
   }
 }
@@ -359,6 +395,10 @@ export function updateReplayTick(timestamp) {
 
   const elapsed = timestamp - replay.state.lastTickTime;
   const msPerCycle = 1000 / replay.state.speed;
+
+  // Always sync fractional position for smooth animation, even between cycle ticks
+  const subCycleFraction = Math.min(elapsed / msPerCycle, 1);
+  syncTracedPackets(replay.state.currentCycle, subCycleFraction);
   const cyclesToAdvance = Math.min(
     Math.floor(elapsed / msPerCycle),
     PREFETCH_SIZE,
@@ -397,6 +437,8 @@ export function updateReplayTick(timestamp) {
     timestamp - msPerCycle,
   );
   replay.state.currentCycle = advancedTo;
+  const fraction = (timestamp - replay.state.lastTickTime) / msPerCycle;
+  syncTracedPackets(advancedTo, Math.min(fraction, 1));
 
   if (replay.prefetchEndIdx >= 0) {
     const currentIdx = TraceParser.findCycleIndexGE(replay.traceData.cycleIndex, advancedTo + 1);
@@ -485,17 +527,38 @@ export function seekToCycle(targetCycle) {
   updateScrubUI();
   updatePETraceHighlight();
 
-  const gen = replay.generation;
-  const idx = TraceParser.findCycleIndex(cycleIndex, targetCycle);
-  if (idx !== -1) {
-    TraceParser.loadCycleRange(replay.traceData, idx, idx).then((batch) => {
-      if (gen !== replay.generation || !replay.state) return;
-      const events = batch.get(targetCycle);
-      if (!events) return;
-      const msPerCycle = 1000 / replay.state.speed;
-      sendLandingPackets(events, msPerCycle, Infinity);
-      animationLoop.start();
-    }).catch(() => {});
+  const td = replay.traceData;
+  const msPerCycle = 1000 / replay.state.speed;
+
+  if (td.hasWaveletData) {
+    // Find all wavelets in-flight at targetCycle and create TracedPackets at current position
+    for (const [, wv] of td.waveletIndex) {
+      const firstCycle = wv.hops[0].cycle;
+      const lastCycle = wv.hops[wv.hops.length - 1].cycle;
+      if (firstCycle > targetCycle || lastCycle < targetCycle) continue;
+      const branches = getBranches(wv);
+      for (const waypoints of branches) {
+        const branchEnd = waypoints[waypoints.length - 1].cycle;
+        if (branchEnd < targetCycle) continue;
+        const pkt = new TracedPacket(waypoints, td.dimY);
+        pkt.setCycle(targetCycle);
+        pkt.setFractionalCycle(targetCycle);
+        grid.packets.push(pkt);
+      }
+    }
+    animationLoop.start();
+  } else {
+    const gen = replay.generation;
+    const idx = TraceParser.findCycleIndex(cycleIndex, targetCycle);
+    if (idx !== -1) {
+      TraceParser.loadCycleRange(td, idx, idx).then((batch) => {
+        if (gen !== replay.generation || !replay.state) return;
+        const events = batch.get(targetCycle);
+        if (!events) return;
+        sendLandingPackets(events, msPerCycle, Infinity);
+        animationLoop.start();
+      }).catch(() => {});
+    }
   }
 
   prefetchFrom(targetCycle).catch(() => {});
