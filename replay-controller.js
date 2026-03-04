@@ -677,9 +677,11 @@ export function setupScrubListeners() {
       els.panelResizer.classList.remove("dragging");
       els.panelResizer.removeEventListener("pointermove", onMove);
       els.panelResizer.removeEventListener("pointerup", onUp);
+      els.panelResizer.removeEventListener("pointercancel", onUp);
     };
 
     els.panelResizer.addEventListener("pointermove", onMove);
     els.panelResizer.addEventListener("pointerup", onUp);
+    els.panelResizer.addEventListener("pointercancel", onUp);
   });
 }

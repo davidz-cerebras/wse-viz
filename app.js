@@ -9,8 +9,6 @@ import {
 } from "./replay-controller.js";
 import { GRID_ROWS, GRID_COLS, CELL_SIZE, GAP } from "./constants.js";
 
-// Target canvas dimension derived from default grid columns
-const BASE_CANVAS_SIZE = GRID_COLS * (CELL_SIZE + GAP) + GAP;
 const DIRECTIONS = [
   { dr: -1, dc: 0 },
   { dr: 1, dc: 0 },
@@ -25,6 +23,8 @@ let ctx;
 let simulationInterval;
 let els;
 let canvasScale = 1;
+let gridNaturalWidth = 0;
+let gridNaturalHeight = 0;
 
 function init() {
   canvas = document.getElementById("wseCanvas");
@@ -63,7 +63,7 @@ function update(timestamp) {
 }
 
 function draw(timestamp) {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.clearRect(0, 0, gridNaturalWidth, gridNaturalHeight);
   grid.draw(ctx, timestamp);
 }
 
@@ -97,6 +97,7 @@ function stopSimulation() {
 }
 
 function setupEventListeners() {
+  window.addEventListener("resize", resizeCanvas);
   document.getElementById("startBtn").addEventListener("click", startSimulation);
   document.getElementById("allReduceFullBtn").addEventListener("click", startAllReduceFull);
   document.getElementById("spmvBtn").addEventListener("click", startSpMV);
@@ -167,6 +168,8 @@ function showPanel(panel) {
   els.cgPanel.classList.toggle("hidden", panel !== "cg");
   els.tracePanel.classList.toggle("hidden", panel !== "trace");
   els.playbackBar.classList.toggle("hidden", panel !== "trace");
+  // Refit canvas after panel visibility changes the available space
+  requestAnimationFrame(resizeCanvas);
 }
 
 function handleCanvasClick(e) {
@@ -202,15 +205,48 @@ function setGrid(rows, cols) {
   if (grid) grid.cancel();
   grid = new Grid(rows, cols, CELL_SIZE, GAP);
   setReplayGrid(grid);
-  const naturalWidth = cols * (CELL_SIZE + GAP) + GAP;
-  const naturalHeight = rows * (CELL_SIZE + GAP) + GAP;
-  canvasScale = BASE_CANVAS_SIZE / Math.max(naturalWidth, naturalHeight);
-  canvas.width = Math.round(naturalWidth * canvasScale);
-  canvas.height = Math.round(naturalHeight * canvasScale);
-  // Reset inline styles so canvas renders at its attribute dimensions
-  canvas.style.width = "";
-  canvas.style.height = "";
-  ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
+  gridNaturalWidth = cols * (CELL_SIZE + GAP) + GAP;
+  gridNaturalHeight = rows * (CELL_SIZE + GAP) + GAP;
+  resizeCanvas();
+}
+
+function resizeCanvas() {
+  if (!gridNaturalWidth || !gridNaturalHeight) return;
+
+  const container = canvas.parentElement;
+  const maxW = container.clientWidth;
+  const maxH = container.clientHeight;
+  if (maxW <= 0 || maxH <= 0) return;
+
+  const aspect = gridNaturalWidth / gridNaturalHeight;
+
+  let displayW, displayH;
+  if (maxW / maxH > aspect) {
+    displayH = maxH;
+    displayW = maxH * aspect;
+  } else {
+    displayW = maxW;
+    displayH = maxW / aspect;
+  }
+
+  const newW = Math.round(displayW);
+  const newH = Math.round(displayH);
+
+  // Only reset the canvas buffer if dimensions actually changed
+  // (setting canvas.width/height clears the buffer and resets context state)
+  if (canvas.width !== newW || canvas.height !== newH) {
+    canvasScale = displayW / gridNaturalWidth;
+    canvas.width = newW;
+    canvas.height = newH;
+    canvas.style.width = `${Math.round(displayW)}px`;
+    canvas.style.height = `${Math.round(displayH)}px`;
+    ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
+    // Draw immediately so the canvas is never left blank after resize.
+    // Can't rely on the animation loop because update() may auto-stop
+    // before draw() runs if there's no active simulation or replay.
+    draw(performance.now());
+    if (animationLoop) animationLoop.start();
+  }
 }
 
 document.addEventListener("DOMContentLoaded", init);
