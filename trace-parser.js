@@ -1,11 +1,35 @@
 const landingRegex =
   /^@(\d+) P(\d+)\.(\d+) \(\w+\) landing C(\d+) from link ([WESNR]),/;
 const exOpRegex = /^@(\d+) P(\d+)\.(\d+):.*\[EX OP\]/;
-const opcodeRegex = /T\d+(?:\.\w+)?\s+(\S+)/;
+const opcodeRegex = /T\d+(?:\.\w+)?\s+(!?(?:CF|p)\d+(?::\d+)?\?)?\s*(\S+)/;
 const waveletStallRegex =
   /^@(\d+) P(\d+)\.(\d+):.*Not enough wavelets \((\d+)\/(\d+)\) (SRC\d) with C(\d+), IN_Q\[(\d+)\], SIMD-(\d+)/;
 const waveletRegex =
   /^@(\d+) P(\d+)\.(\d+) \(\w+\) wavelet C(\d+) ctrl=(\d), idx=([0-9a-fA-F]+), data=([0-9a-fA-F]+) \([^)]*\([^)]*\)\), half=(\d), ident=([0-9a-fA-F]+) landing=([RENWSD-]) departing=\/(.{5})\//;
+
+// Landing direction encoding for typed arrays
+const LANDING_ENCODE = { R: 0, E: 1, N: 2, W: 3, S: 4, "-": 5, D: 6 };
+export const LANDING_DECODE = ["R", "E", "N", "W", "S", "-", "D"];
+
+export function decodeDeparting(mask) {
+  const dirs = [];
+  if (mask & 1) dirs.push("E");
+  if (mask & 2) dirs.push("N");
+  if (mask & 4) dirs.push("W");
+  if (mask & 8) dirs.push("S");
+  return dirs;
+}
+
+function encodeDeparting(dirs) {
+  let mask = 0;
+  for (const d of dirs) {
+    if (d === "E") mask |= 1;
+    else if (d === "N") mask |= 2;
+    else if (d === "W") mask |= 4;
+    else if (d === "S") mask |= 8;
+  }
+  return mask;
+}
 
 function parseLanding(line) {
   if (!line.includes(") landing C")) return null;
@@ -32,10 +56,14 @@ function parseExOp(line) {
   }
   const busy = !line.includes("[EX OP] IDLE");
   let op = null;
+  let pred = null;
   if (busy) {
     const afterExOp = line.split("[EX OP]")[1];
     const opcodeMatch = afterExOp.match(opcodeRegex);
-    if (opcodeMatch) op = opcodeMatch[1];
+    if (opcodeMatch) {
+      pred = opcodeMatch[1] || null;
+      op = opcodeMatch[2];
+    }
   }
   return {
     cycle: parseInt(m[1]),
@@ -43,6 +71,7 @@ function parseExOp(line) {
     y: parseInt(m[3]),
     busy,
     op,
+    pred,
   };
 }
 
@@ -111,39 +140,16 @@ export class TraceParser {
     let totalEvents = 0;
 
     const dimRegex = /^@\d+ dimX=(\d+), dimY=(\d+)/;
-    const prevExState = new Map();   // per-PE EX OP dedup
-    const prevStallState = new Map(); // per-PE stall dedup (separate from EX OP)
-    const peStateIndex = new Map();
-    const peStallIndex = new Map();   // key → [{startCycle, endCycle, color, src, queue}]
-    const stallActive = new Map();    // key → {startCycle, color, src, queue, lastCycle}
-    const waveletIndex = new Map();   // ident → { ident, color, ctrl, hops: [] }
+    const prevExState = new Map();
+    const prevStallState = new Map();
+    const peStateTemp = new Map();   // temporary: arrays of objects
+    const peStallIndex = new Map();  // key → [{startCycle, endCycle, color, src, queue}]
+    const stallActive = new Map();   // key → {startCycle, color, src, queue, lastCycle}
+    const waveletTemp = new Map();   // ident → { ident, color, ctrl, hops: [] }
+    const landingsByCycle = new Map();
     let hasWaveletData = false;
 
-    const tmpCycles = [];
-    const tmpStarts = [];
-    const tmpEnds = [];
-    let currentCycle = -1;
-    let blockByteStart = 0;
-    let hasEvents = false;
-
-    const processLine = (line, lineByteStart) => {
-      if (line.charCodeAt(0) === 64) {
-        const spaceIdx = line.indexOf(" ", 1);
-        if (spaceIdx > 1) {
-          const cycle = parseInt(line.substring(1, spaceIdx));
-          if (cycle !== currentCycle) {
-            if (hasEvents && currentCycle >= 0) {
-              tmpCycles.push(currentCycle);
-              tmpStarts.push(blockByteStart);
-              tmpEnds.push(lineByteStart);
-            }
-            currentCycle = cycle;
-            blockByteStart = lineByteStart;
-            hasEvents = false;
-          }
-        }
-      }
-
+    const processLine = (line) => {
       if (dimX === 0) {
         const dimMatch = line.match(dimRegex);
         if (dimMatch) {
@@ -158,30 +164,25 @@ export class TraceParser {
         if (landing.cycle < minCycle) minCycle = landing.cycle;
         if (landing.cycle > maxCycle) maxCycle = landing.cycle;
         totalEvents++;
-        hasEvents = true;
+        let arr = landingsByCycle.get(landing.cycle);
+        if (!arr) { arr = []; landingsByCycle.set(landing.cycle, arr); }
+        arr.push({ x: landing.x, y: landing.y, color: landing.color, dir: landing.dir });
         return;
       }
 
       const wv = parseWavelet(line);
       if (wv) {
         hasWaveletData = true;
-        hasEvents = true;
         totalEvents++;
 
-        // Determine if this hop is consumed (delivered to compute element)
-        wv.consumed = wv.toCe || (wv.landing !== "-" && wv.departing.length === 0 && !wv.noCe);
-
-        let entry = waveletIndex.get(wv.ident);
+        let entry = waveletTemp.get(wv.ident);
         if (!entry) {
           entry = { ident: wv.ident, color: wv.color, ctrl: wv.ctrl, hops: [] };
-          waveletIndex.set(wv.ident, entry);
+          waveletTemp.set(wv.ident, entry);
         }
         entry.hops.push({
           cycle: wv.cycle, x: wv.x, y: wv.y,
           landing: wv.landing, departing: wv.departing,
-          consumed: wv.consumed, noCe: wv.noCe, toCe: wv.toCe,
-          colorswap: wv.colorswap, lf: wv.lf,
-          idx: wv.idx, data: wv.data, half: wv.half,
         });
 
         if (wv.cycle < minCycle) minCycle = wv.cycle;
@@ -192,13 +193,10 @@ export class TraceParser {
       const stall = parseWaveletStall(line);
       if (stall) {
         const key = `${stall.x},${stall.y}`;
-        // Track stall ranges: extend active stall or start a new one
-        // A gap of >1 cycle between consecutive stall events means the stall ended and restarted
         const active = stallActive.get(key);
         if (active && stall.cycle <= active.lastCycle + 1) {
           active.lastCycle = stall.cycle;
         } else {
-          // Close previous range if any
           if (active) {
             if (!peStallIndex.has(key)) peStallIndex.set(key, []);
             peStallIndex.get(key).push({
@@ -211,39 +209,34 @@ export class TraceParser {
             color: stall.color, src: stall.src, queue: stall.queue,
           });
         }
-        // Also record in peStateIndex for seek reconstruction (deduplicated)
         const state = `S:${stall.color}`;
         if (prevStallState.get(key) !== state) {
           prevStallState.set(key, state);
-          if (!peStateIndex.has(key)) peStateIndex.set(key, []);
-          peStateIndex.get(key).push({
-            cycle: stall.cycle, busy: false, op: null,
-            stall: "wavelet", stallColor: stall.color,
-            stallHave: stall.have, stallNeed: stall.need,
-            stallSrc: stall.src, stallQueue: stall.queue,
+          if (!peStateTemp.has(key)) peStateTemp.set(key, []);
+          peStateTemp.get(key).push({
+            cycle: stall.cycle, busy: false, op: null, pred: null,
+            stall: true, stallColor: stall.color,
           });
           if (stall.cycle < minCycle) minCycle = stall.cycle;
           if (stall.cycle > maxCycle) maxCycle = stall.cycle;
         }
-        hasEvents = true;
         return;
       }
 
       const ex = parseExOp(line);
       if (ex) {
         const key = `${ex.x},${ex.y}`;
-        const state = ex.busy ? `1:${ex.op}` : "0";
+        const state = ex.busy ? `1:${ex.pred || ""}:${ex.op}` : "0";
         if (prevExState.get(key) !== state) {
           prevExState.set(key, state);
-          if (!peStateIndex.has(key)) peStateIndex.set(key, []);
-          peStateIndex.get(key).push({
-            cycle: ex.cycle, busy: ex.busy, op: ex.op,
-            stall: null, stallColor: null,
+          if (!peStateTemp.has(key)) peStateTemp.set(key, []);
+          peStateTemp.get(key).push({
+            cycle: ex.cycle, busy: ex.busy, op: ex.op, pred: ex.pred,
+            stall: false, stallColor: 0,
           });
           if (ex.cycle < minCycle) minCycle = ex.cycle;
           if (ex.cycle > maxCycle) maxCycle = ex.cycle;
         }
-        hasEvents = true;
       }
     };
 
@@ -252,7 +245,6 @@ export class TraceParser {
       .pipeThrough(new TextDecoderStream())
       .getReader();
     let partial = "";
-    let byteOffset = 0;
 
     for (;;) {
       const { done, value } = await reader.read();
@@ -263,34 +255,13 @@ export class TraceParser {
       partial = lines.pop();
 
       for (const line of lines) {
-        const lineByteStart = byteOffset;
-        // Byte offset tracking assumes ASCII (1 byte per char). This is safe
-        // because simfabric trace files are always pure ASCII.
-        byteOffset += line.length + 1;
-        processLine(line, lineByteStart);
+        processLine(line);
       }
     }
 
-    // Handle remaining partial line (file may not end with \n)
     if (partial.length > 0) {
-      processLine(partial, byteOffset);
-      byteOffset += partial.length;
+      processLine(partial);
     }
-
-    // Flush last cycle block
-    if (hasEvents && currentCycle >= 0) {
-      tmpCycles.push(currentCycle);
-      tmpStarts.push(blockByteStart);
-      tmpEnds.push(byteOffset);
-    }
-
-    const len = tmpCycles.length;
-    const cycleIndex = {
-      cycles: new Float64Array(tmpCycles),
-      starts: new Float64Array(tmpStarts),
-      ends: new Float64Array(tmpEnds),
-      length: len,
-    };
 
     // Close any stall ranges still active at end of trace
     for (const [key, active] of stallActive) {
@@ -301,16 +272,58 @@ export class TraceParser {
       });
     }
 
-    // Pre-compute per-PE cycle arrays for binary search during seek
-    for (const [, events] of peStateIndex) {
-      events.cycleArray = new Float64Array(events.map(e => e.cycle));
+    // Compact peStateIndex into typed arrays
+    const peStateIndex = new Map();
+    for (const [key, events] of peStateTemp) {
+      const len = events.length;
+      const cycles = new Float64Array(len);
+      const busy = new Uint8Array(len);
+      const ops = new Array(len);
+      const preds = new Array(len);
+      const stall = new Uint8Array(len);
+      const stallColors = new Uint16Array(len);
+      for (let i = 0; i < len; i++) {
+        const e = events[i];
+        cycles[i] = e.cycle;
+        busy[i] = e.busy ? 1 : 0;
+        ops[i] = e.op;
+        preds[i] = e.pred;
+        stall[i] = e.stall ? 1 : 0;
+        stallColors[i] = e.stallColor || 0;
+      }
+      peStateIndex.set(key, { cycles, busy, ops, preds, stall, stallColors, length: len });
+    }
+
+    // Compact wavelet hops into typed arrays
+    const waveletIndex = new Map();
+    for (const [ident, entry] of waveletTemp) {
+      const hops = entry.hops;
+      const len = hops.length;
+      const cycles = new Float64Array(len);
+      const xs = new Uint16Array(len);
+      const ys = new Uint16Array(len);
+      const landings = new Uint8Array(len);
+      const departings = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        const h = hops[i];
+        cycles[i] = h.cycle;
+        xs[i] = h.x;
+        ys[i] = h.y;
+        landings[i] = LANDING_ENCODE[h.landing] ?? 5;
+        departings[i] = encodeDeparting(h.departing);
+      }
+      waveletIndex.set(ident, {
+        ident: entry.ident,
+        color: entry.color,
+        ctrl: entry.ctrl,
+        hops: { cycles, xs, ys, landings, departings, length: len },
+      });
     }
 
     return {
-      file,
       dimX,
       dimY,
-      cycleIndex,
+      landingsByCycle,
       peStateIndex,
       peStallIndex,
       waveletIndex,
@@ -319,31 +332,6 @@ export class TraceParser {
       maxCycle,
       totalEvents,
     };
-  }
-
-  static findCycleIndex(cycleIndex, cycle) {
-    const { cycles, length } = cycleIndex;
-    let lo = 0;
-    let hi = length - 1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (cycles[mid] === cycle) return mid;
-      if (cycles[mid] < cycle) lo = mid + 1;
-      else hi = mid - 1;
-    }
-    return -1;
-  }
-
-  static findCycleIndexGE(cycleIndex, cycle) {
-    const { cycles, length } = cycleIndex;
-    let lo = 0;
-    let hi = length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (cycles[mid] < cycle) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
   }
 
   static findCycleIndexLE(cycleIndex, cycle) {
@@ -361,65 +349,6 @@ export class TraceParser {
       }
     }
     return found;
-  }
-
-  static async loadCycleRange(traceData, fromIdx, toIdx) {
-    const { file, cycleIndex } = traceData;
-    if (fromIdx < 0 || toIdx >= cycleIndex.length || fromIdx > toIdx) {
-      return new Map();
-    }
-
-    const { starts, ends } = cycleIndex;
-    const blob = file.slice(starts[fromIdx], ends[toIdx]);
-    const text = await blob.text();
-
-    const result = new Map();
-    const prevExState = new Map();
-    const prevStallState = new Map();
-
-    function getOrCreateCycle(cycle) {
-      let entry = result.get(cycle);
-      if (!entry) {
-        entry = { landings: [], execChanges: [] };
-        result.set(cycle, entry);
-      }
-      return entry;
-    }
-
-    for (const line of text.split("\n")) {
-      const landing = parseLanding(line);
-      if (landing) {
-        getOrCreateCycle(landing.cycle).landings.push(landing);
-        continue;
-      }
-      const stall = parseWaveletStall(line);
-      if (stall) {
-        const key = `${stall.x},${stall.y}`;
-        const state = `S:${stall.color}`;
-        if (prevStallState.get(key) !== state) {
-          prevStallState.set(key, state);
-          getOrCreateCycle(stall.cycle).execChanges.push({
-            cycle: stall.cycle, x: stall.x, y: stall.y,
-            busy: false, op: null,
-            stall: "wavelet", stallColor: stall.color,
-          });
-        }
-        continue;
-      }
-      const ex = parseExOp(line);
-      if (ex) {
-        const key = `${ex.x},${ex.y}`;
-        const state = ex.busy ? `1:${ex.op}` : "0";
-        if (prevExState.get(key) !== state) {
-          prevExState.set(key, state);
-          getOrCreateCycle(ex.cycle).execChanges.push({
-            ...ex, stall: null, stallColor: null,
-          });
-        }
-      }
-    }
-
-    return result;
   }
 
   // Returns the source PE coordinates for a landing event. The direction

@@ -26,7 +26,5 @@ export const PE_DIM_DURATION = 500;
 export const PE_BRIGHTNESS_THRESHOLD = 0.5;
 
 // Replay tuning
-export const PREFETCH_SIZE = 100;
-export const MAX_PREFETCH_BYTES = 2 * 1024 * 1024; // 2MB cap per prefetch
 export const MAX_LOG_ENTRIES = 500;
 export const PE_TRACE_WINDOW = 500; // max DOM entries rendered at once

@@ -1,5 +1,6 @@
 import { drawPacketDot } from "./draw-utils.js";
 import { CELL_SIZE, RAMP_DEPTH, RAMP_LATERAL } from "./constants.js";
+import { LANDING_DECODE, decodeDeparting } from "./trace-parser.js";
 
 // Direction → trace coordinate delta
 const DIR_DELTA = { E: [1, 0], W: [-1, 0], N: [0, -1], S: [0, 1] };
@@ -15,8 +16,16 @@ export function extractBranches(wavelet) {
   const { hops } = wavelet;
   if (hops.length === 0) return [];
 
+  // Decode typed arrays into lightweight objects for the hopsByPos Map
   const hopsByPos = new Map();
-  for (const hop of hops) {
+  for (let i = 0; i < hops.length; i++) {
+    const hop = {
+      cycle: hops.cycles[i],
+      x: hops.xs[i],
+      y: hops.ys[i],
+      landing: LANDING_DECODE[hops.landings[i]],
+      departing: decodeDeparting(hops.departings[i]),
+    };
     const key = `${hop.cycle},${hop.x},${hop.y}`;
     if (!hopsByPos.has(key)) hopsByPos.set(key, []);
     hopsByPos.get(key).push(hop);
@@ -109,8 +118,7 @@ export function extractBranches(wavelet) {
     }
   }
 
-  const first = hops[0];
-  traceBranch(first.cycle, first.x, first.y, first.landing);
+  traceBranch(hops.cycles[0], hops.xs[0], hops.ys[0], LANDING_DECODE[hops.landings[0]]);
 
   return branches;
 }

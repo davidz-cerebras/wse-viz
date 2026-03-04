@@ -1,16 +1,12 @@
 import { TraceParser } from "./trace-parser.js";
 import { extractBranches, TracedPacket } from "./wavelet.js";
-import { PREFETCH_SIZE, MAX_PREFETCH_BYTES, MAX_LOG_ENTRIES, PE_TRACE_WINDOW } from "./constants.js";
+import { MAX_LOG_ENTRIES, PE_TRACE_WINDOW } from "./constants.js";
 
 let grid, els, animationLoop, showPanel;
 
 const replay = {
   traceData: null,
   state: null,
-  cycleCache: new Map(),
-  prefetchEndIdx: -1,
-  prefetchInFlight: false,
-  generation: 0,
 };
 
 let isScrubbing = false;
@@ -43,45 +39,9 @@ export function getIsScrubbing() {
   return isScrubbing;
 }
 
-function resetPrefetchState() {
-  replay.generation++;
-  replay.prefetchInFlight = false;
-  replay.cycleCache.clear();
-  replay.prefetchEndIdx = -1;
-}
-
-async function prefetchFrom(startCycle) {
-  if (!replay.traceData || replay.prefetchInFlight) return;
-  const { cycleIndex } = replay.traceData;
-  const startIdx = TraceParser.findCycleIndexGE(cycleIndex, startCycle);
-  if (startIdx >= cycleIndex.length) return;
-  let endIdx = Math.min(startIdx + PREFETCH_SIZE - 1, cycleIndex.length - 1);
-
-  // Cap prefetch size to avoid loading multi-MB blobs from verbose traces
-  const { starts, ends } = cycleIndex;
-  while (endIdx > startIdx && ends[endIdx] - starts[startIdx] > MAX_PREFETCH_BYTES) {
-    endIdx--;
-  }
-
-  const gen = replay.generation;
-  replay.prefetchInFlight = true;
-  try {
-    const batch = await TraceParser.loadCycleRange(replay.traceData, startIdx, endIdx);
-    if (gen !== replay.generation) return;
-    for (const [cycle, events] of batch) {
-      replay.cycleCache.set(cycle, events);
-    }
-    replay.prefetchEndIdx = endIdx;
-  } finally {
-    if (gen === replay.generation) {
-      replay.prefetchInFlight = false;
-    }
-  }
-}
-
-function appendLandingEvents(cycle, events) {
-  if (selectedPE) return; // PE-specific trace is showing instead
-  for (const evt of events.landings) {
+function appendLandingEvents(cycle, landings) {
+  if (selectedPE || !landings) return;
+  for (const evt of landings) {
     const entry = document.createElement("div");
     entry.className = "trace-entry trace-landing";
     const dir = evt.dir === "R" ? "local" : `\u2190 ${evt.dir}`;
@@ -114,9 +74,9 @@ function syncTracedPackets(cycle, fraction) {
   }
 }
 
-function sendLandingPackets(events, msPerCycle, startTime) {
+function sendLandingPackets(landings, msPerCycle, startTime) {
   const dimY = replay.traceData.dimY;
-  for (const evt of events.landings) {
+  for (const evt of landings) {
     if (evt.dir === "R") continue;
     const src = TraceParser.sourceCoords(evt.x, evt.y, evt.dir);
     if (!src) continue;
@@ -130,31 +90,28 @@ function sendLandingPackets(events, msPerCycle, startTime) {
  * Reconstruct the full grid state at a given cycle. Used by both seek and playback
  * to ensure a single consistent code path for state reconstruction.
  */
-function reconstructStateAtCycle(targetCycle, currentCycleEvents) {
+function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
   const td = replay.traceData;
   if (!td) return;
 
   grid.clearPackets();
   grid.resetAllPEs();
 
-  // 1. Reconstruct EX OP state from peStateIndex
-  // peStateIndex interleaves EX OP and stall events. We need the most recent
-  // non-stall event to get the correct execution state.
-  for (const [key, events] of td.peStateIndex) {
+  // 1. Reconstruct EX OP state from peStateIndex (compact typed arrays)
+  for (const [key, entry] of td.peStateIndex) {
     const found = TraceParser.findCycleIndexLE(
-      { cycles: events.cycleArray, length: events.length },
+      { cycles: entry.cycles, length: entry.length },
       targetCycle,
     );
     if (found >= 0) {
-      // Search backward for the most recent EX OP event (skip stall events)
-      let exEvt = null;
+      let exIdx = -1;
       for (let i = found; i >= 0; i--) {
-        if (!events[i].stall) { exEvt = events[i]; break; }
+        if (!entry.stall[i]) { exIdx = i; break; }
       }
-      if (exEvt) {
+      if (exIdx >= 0) {
         const [x, y] = key.split(",").map(Number);
         const { row, col } = TraceParser.toGridCoords(x, y, td.dimY);
-        grid.setPEBusy(row, col, exEvt.busy, exEvt.op, null);
+        grid.setPEBusy(row, col, !!entry.busy[exIdx], entry.ops[exIdx], null);
       }
     }
   }
@@ -174,8 +131,8 @@ function reconstructStateAtCycle(targetCycle, currentCycleEvents) {
   // 3. Create packets for in-flight wavelets or DataPackets for old traces
   if (td.hasWaveletData) {
     for (const [, wv] of td.waveletIndex) {
-      const firstCycle = wv.hops[0].cycle;
-      const lastCycle = wv.hops[wv.hops.length - 1].cycle;
+      const firstCycle = wv.hops.cycles[0];
+      const lastCycle = wv.hops.cycles[wv.hops.length - 1];
       if (firstCycle > targetCycle || lastCycle < targetCycle) continue;
       const branches = getBranches(wv);
       for (const waypoints of branches) {
@@ -187,10 +144,10 @@ function reconstructStateAtCycle(targetCycle, currentCycleEvents) {
         grid.packets.push(pkt);
       }
     }
-  } else if (currentCycleEvents) {
+  } else if (currentCycleLandings) {
     // Old traces: create DataPackets from landing events for the current cycle
     const msPerCycle = replay.state ? 1000 / replay.state.speed : 250;
-    sendLandingPackets(currentCycleEvents, msPerCycle);
+    sendLandingPackets(currentCycleLandings, msPerCycle);
   }
 }
 
@@ -204,7 +161,7 @@ export function selectPE(row, col, traceX, traceY) {
   }
 
   const key = `${traceX},${traceY}`;
-  const events = replay.traceData.peStateIndex.get(key) || [];
+  const entry = replay.traceData.peStateIndex.get(key);
 
   grid.selectPE(row, col);
   peTraceScrollLock = false;
@@ -217,26 +174,31 @@ export function selectPE(row, col, traceX, traceY) {
   //   C stage (CalcAddr): stallArr + stallColorArr
   const busyArr = new Uint8Array(totalCycles);
   const opArr = new Array(totalCycles).fill(null);
+  const predArr = new Array(totalCycles).fill(null);
   const stallArr = new Uint8Array(totalCycles);
   const stallColorArr = new Array(totalCycles).fill(null);
 
   // Fill E stage from EX OP events (forward-carry)
-  let evtIdx = 0;
-  let busy = false;
-  let op = null;
-  for (let i = 0; i < totalCycles; i++) {
-    const cycle = minCycle + i;
-    while (evtIdx < events.length && events[evtIdx].cycle <= cycle) {
-      const evt = events[evtIdx];
-      if (!evt.stall) {
-        busy = evt.busy;
-        op = evt.op;
+  if (entry) {
+    let evtIdx = 0;
+    let curBusy = 0;
+    let curOp = null;
+    let curPred = null;
+    for (let i = 0; i < totalCycles; i++) {
+      const cycle = minCycle + i;
+      while (evtIdx < entry.length && entry.cycles[evtIdx] <= cycle) {
+        if (!entry.stall[evtIdx]) {
+          curBusy = entry.busy[evtIdx];
+          curOp = entry.ops[evtIdx];
+          curPred = entry.preds[evtIdx];
+        }
+        evtIdx++;
       }
-      evtIdx++;
-    }
-    if (busy) {
-      busyArr[i] = 1;
-      opArr[i] = op;
+      if (curBusy) {
+        busyArr[i] = 1;
+        opArr[i] = curOp;
+        predArr[i] = curPred;
+      }
     }
   }
 
@@ -260,7 +222,7 @@ export function selectPE(row, col, traceX, traceY) {
     }
   }
 
-  selectedPE = { row, col, traceX, traceY, minCycle, totalCycles, busyArr, stallArr, stallColorArr, opArr, opCounts };
+  selectedPE = { row, col, traceX, traceY, minCycle, totalCycles, busyArr, stallArr, stallColorArr, opArr, predArr, opCounts };
 
   // Update panel header
   els.tracePanel.querySelector("h2").textContent = `P${traceX}.${traceY} Trace`;
@@ -344,7 +306,7 @@ function updateOpChartHighlight() {
 
 function renderPETraceWindow(centerCycle) {
   if (!selectedPE) return;
-  const { minCycle, totalCycles, busyArr, stallArr, stallColorArr, opArr } = selectedPE;
+  const { minCycle, totalCycles, busyArr, stallArr, stallColorArr, opArr, predArr } = selectedPE;
 
   const centerIdx = Math.max(0, Math.min(centerCycle - minCycle, totalCycles - 1));
   const halfWin = Math.floor(PE_TRACE_WINDOW / 2);
@@ -379,6 +341,12 @@ function renderPETraceWindow(centerCycle) {
     cSpan.className = stalled ? "trace-pipe-stage trace-stall" : "trace-pipe-stage trace-pipe-empty";
     cSpan.textContent = stalled ? `STALL C${stallColorArr[i]}` : "\u2014";
     entry.appendChild(cSpan);
+
+    // Predicate prefix
+    const predSpan = document.createElement("span");
+    predSpan.className = "trace-pipe-stage trace-pred";
+    predSpan.textContent = predArr[i] || "";
+    entry.appendChild(predSpan);
 
     // E stage (Execute)
     const eSpan = document.createElement("span");
@@ -480,11 +448,8 @@ export function updateReplayTick(timestamp) {
   // Always sync fractional position for smooth animation, even between cycle ticks
   const subCycleFraction = Math.min(elapsed / msPerCycle, 1);
   syncTracedPackets(replay.state.currentCycle, subCycleFraction);
-  const cyclesToAdvance = Math.min(
-    Math.floor(elapsed / msPerCycle),
-    PREFETCH_SIZE,
-  );
 
+  const cyclesToAdvance = Math.floor(elapsed / msPerCycle);
   if (cyclesToAdvance <= 0) return;
 
   const endCycle = Math.min(
@@ -492,51 +457,35 @@ export function updateReplayTick(timestamp) {
     replay.state.maxCycle,
   );
 
-  // Check if all needed cycles are in the cache; if not, trigger prefetch
-  let advancedTo = endCycle;
-  let advancedToEvents = null; // events for exactly the advancedTo cycle, if available
-  const { cycleIndex } = replay.traceData;
-  let idx = TraceParser.findCycleIndexGE(cycleIndex, replay.state.currentCycle + 1);
-  while (idx < cycleIndex.length) {
-    const cycle = cycleIndex.cycles[idx];
-    if (cycle > endCycle) break;
-    if (!replay.cycleCache.has(cycle)) {
-      prefetchFrom(cycle).catch(() => {});
-      advancedTo = cycle - 1;
-      break;
-    }
-    const events = replay.cycleCache.get(cycle);
-    appendLandingEvents(cycle, events);
-    if (cycle === advancedTo) advancedToEvents = events;
-    replay.cycleCache.delete(cycle);
-    idx++;
+  // Append landing events — only for the tail of the range to avoid
+  // wasteful DOM work when jumping many cycles (e.g. tab was backgrounded)
+  const td = replay.traceData;
+  const logStart = Math.max(replay.state.currentCycle + 1, endCycle - MAX_LOG_ENTRIES);
+  for (let c = logStart; c <= endCycle; c++) {
+    const landings = td.landingsByCycle.get(c);
+    if (landings) appendLandingEvents(c, landings);
   }
 
-  const actualAdvanced = advancedTo - replay.state.currentCycle;
+  const actualAdvanced = endCycle - replay.state.currentCycle;
   replay.state.lastTickTime = Math.max(
     replay.state.lastTickTime + actualAdvanced * msPerCycle,
     timestamp - msPerCycle,
   );
-  replay.state.currentCycle = advancedTo;
+  replay.state.currentCycle = endCycle;
 
   // Only reconstruct when the cycle actually changes (not every frame)
-  if (advancedTo !== lastReconstructedCycle) {
-    reconstructStateAtCycle(advancedTo, advancedToEvents);
-    lastReconstructedCycle = advancedTo;
+  if (endCycle !== lastReconstructedCycle) {
+    const landings = td.landingsByCycle.get(endCycle);
+    reconstructStateAtCycle(endCycle, landings || null);
+    lastReconstructedCycle = endCycle;
   }
   const fraction = (timestamp - replay.state.lastTickTime) / msPerCycle;
-  syncTracedPackets(advancedTo, Math.min(fraction, 1));
+  syncTracedPackets(endCycle, Math.min(fraction, 1));
 
-  if (replay.prefetchEndIdx >= 0) {
-    const currentIdx = TraceParser.findCycleIndexGE(replay.traceData.cycleIndex, advancedTo + 1);
-    if (currentIdx >= replay.prefetchEndIdx - 20) {
-      prefetchFrom(advancedTo + 1).catch(() => {});
-    }
-  }
   updateScrubUI();
   updatePETraceHighlight();
 
-  if (advancedTo >= replay.state.maxCycle) {
+  if (endCycle >= replay.state.maxCycle) {
     replay.state.playing = false;
     els.playPauseBtn.textContent = "\u25B6";
     els.cycleDisplay.textContent =
@@ -556,7 +505,6 @@ export function resumePlayback() {
       pkt.duration = msPerCycle;
     }
   }
-  prefetchFrom(replay.state.currentCycle + 1).catch(() => {});
   els.playPauseBtn.textContent = "\u23F8";
   animationLoop.start();
 }
@@ -586,8 +534,9 @@ export function adjustSpeed(factor) {
 export function seekToCycle(targetCycle) {
   if (!replay.state || !replay.traceData || !Number.isFinite(targetCycle)) return;
 
-  resetPrefetchState();
   grid.resetTimers();
+
+  // Reconstruct state without landings (seek uses frozen packets separately)
   reconstructStateAtCycle(targetCycle);
   lastReconstructedCycle = targetCycle;
 
@@ -599,32 +548,21 @@ export function seekToCycle(targetCycle) {
   updateScrubUI();
   updatePETraceHighlight();
 
-  // For old traces without wavelet data, load frozen DataPackets for the target cycle
+  // For old traces without wavelet data, show frozen DataPackets for the target cycle
   const td = replay.traceData;
   if (!td.hasWaveletData) {
-    const gen = replay.generation;
-    const msPerCycle = 1000 / replay.state.speed;
-    const idx = TraceParser.findCycleIndex(td.cycleIndex, targetCycle);
-    if (idx !== -1) {
-      TraceParser.loadCycleRange(td, idx, idx).then((batch) => {
-        if (gen !== replay.generation || !replay.state) return;
-        // Don't add frozen packets if playback has already moved past this cycle
-        if (lastReconstructedCycle !== targetCycle) return;
-        const events = batch.get(targetCycle);
-        if (!events) return;
-        sendLandingPackets(events, msPerCycle, Infinity);
-        animationLoop.start();
-      }).catch(() => {});
+    const landings = td.landingsByCycle.get(targetCycle);
+    if (landings) {
+      const msPerCycle = 1000 / replay.state.speed;
+      sendLandingPackets(landings, msPerCycle, Infinity);
     }
   }
 
   animationLoop.start();
-  prefetchFrom(targetCycle).catch(() => {});
 }
 
 export function cancelReplay() {
   handleTraceGeneration++;
-  resetPrefetchState();
   deselectPE();
   replay.state = null;
   lastReconstructedCycle = -1;
@@ -661,8 +599,6 @@ export async function handleTraceFile(event, setGrid) {
   const speed = 4;
   els.speedDisplay.textContent = `${speed} cyc/s`;
 
-  resetPrefetchState();
-
   replay.state = {
     currentCycle: minCycle - 1,
     speed,
@@ -677,8 +613,6 @@ export async function handleTraceFile(event, setGrid) {
   els.scrubBar.value = minCycle - 1;
   els.playPauseBtn.textContent = "\u25B6";
   updateScrubUI();
-
-  await prefetchFrom(minCycle);
 }
 
 function handleTraceLogClick(e) {

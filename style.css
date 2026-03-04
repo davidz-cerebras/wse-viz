@@ -303,6 +303,12 @@ canvas {
   text-align: left;
 }
 
+.trace-pred {
+  min-width: 55px;
+  color: #ce93d8;
+  font-style: italic;
+}
+
 .trace-pipe-empty {
   color: var(--color-text-muted);
   opacity: 0.4;
