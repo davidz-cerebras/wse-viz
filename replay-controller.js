@@ -218,7 +218,7 @@ export function selectPE(row, col, traceX, traceY) {
   for (let i = 0; i < totalCycles; i++) {
     if (busyArr[i]) {
       const o = (opArr[i] || "?").split(".")[0];
-      opCounts.set(o, (opCounts.get(o) || 0) + 1);
+      if (o !== "NOP") opCounts.set(o, (opCounts.get(o) || 0) + 1);
     }
   }
 
