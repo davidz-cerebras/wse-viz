@@ -4,6 +4,8 @@ const exOpRegex = /^@(\d+) P(\d+)\.(\d+):.*\[EX OP\]/;
 const opcodeRegex = /T\d+(?:\.\w+)?\s+(!?(?:CF|p)\d+(?::\d+)?\?)?\s*(\S+)/;
 const waveletStallRegex =
   /^@(\d+) P(\d+)\.(\d+):.*Not enough wavelets \((\d+)\/(\d+)\) (SRC\d) with C(\d+), IN_Q\[(\d+)\], SIMD-(\d+)/;
+const pipeStallRegex =
+  /^@(\d+) P(\d+)\.(\d+):.*Pipe: (\d+), Msg: stall: (.+)/;
 const waveletRegex =
   /^@(\d+) P(\d+)\.(\d+) \(\w+\) wavelet C(\d+) ctrl=(\d), idx=([0-9a-fA-F]+), data=([0-9a-fA-F]+) \([^)]*\([^)]*\)\), half=(\d), ident=([0-9a-fA-F]+) landing=([RENWSD-]) departing=\/(.{5})\//;
 
@@ -131,6 +133,40 @@ function parseWaveletStall(line) {
   };
 }
 
+// Priority order: wavelet (C) > accum (A) > register (R) > memory (MEM) > DSR (S*DS*)
+const STALL_PRIORITY = { wavelet: 0, accum: 1, register: 2, memory: 3, dsr: 4 };
+
+function classifyPipeStall(msg) {
+  const accumMatch = msg.match(/^dependent accum(\d)/);
+  if (accumMatch) return { kind: "accum", label: `A${accumMatch[1]}`, priority: STALL_PRIORITY.accum };
+
+  const regMatch = msg.match(/^(R\d+) ilock/);
+  if (regMatch) return { kind: "register", label: regMatch[1], priority: STALL_PRIORITY.register };
+
+  if (msg.startsWith("write_pending/read conflict MEM"))
+    return { kind: "memory", label: "MEM", priority: STALL_PRIORITY.memory };
+
+  const dsrMatch = msg.match(/^dependent (S\dDS\d)/);
+  if (dsrMatch) return { kind: "dsr", label: dsrMatch[1], priority: STALL_PRIORITY.dsr };
+
+  return null;
+}
+
+function parsePipeStall(line) {
+  if (!line.includes("Msg: stall:")) return null;
+  const m = line.match(pipeStallRegex);
+  if (!m) return null;
+  const info = classifyPipeStall(m[5]);
+  if (!info) return null;
+  return {
+    cycle: parseInt(m[1]),
+    x: parseInt(m[2]),
+    y: parseInt(m[3]),
+    pipe: parseInt(m[4]),
+    ...info,
+  };
+}
+
 export class TraceParser {
   static async index(file, onProgress) {
     let dimX = 0;
@@ -143,8 +179,6 @@ export class TraceParser {
     const prevExState = new Map();
     const prevStallState = new Map();
     const peStateTemp = new Map();   // temporary: arrays of objects
-    const peStallIndex = new Map();  // key → [{startCycle, endCycle, color, src, queue}]
-    const stallActive = new Map();   // key → {startCycle, color, src, queue, lastCycle}
     const waveletTemp = new Map();   // ident → { ident, color, ctrl, hops: [] }
     const landingsByCycle = new Map();
     let hasWaveletData = false;
@@ -193,32 +227,38 @@ export class TraceParser {
       const stall = parseWaveletStall(line);
       if (stall) {
         const key = `${stall.x},${stall.y}`;
-        const active = stallActive.get(key);
-        if (active && stall.cycle <= active.lastCycle + 1) {
-          active.lastCycle = stall.cycle;
-        } else {
-          if (active) {
-            if (!peStallIndex.has(key)) peStallIndex.set(key, []);
-            peStallIndex.get(key).push({
-              startCycle: active.startCycle, endCycle: active.lastCycle,
-              color: active.color, src: active.src, queue: active.queue,
-            });
-          }
-          stallActive.set(key, {
-            startCycle: stall.cycle, lastCycle: stall.cycle,
-            color: stall.color, src: stall.src, queue: stall.queue,
-          });
-        }
-        const state = `S:${stall.color}`;
+        const reason = `C${stall.color}`;
+        const state = `S:${reason}`;
         if (prevStallState.get(key) !== state) {
           prevStallState.set(key, state);
           if (!peStateTemp.has(key)) peStateTemp.set(key, []);
           peStateTemp.get(key).push({
             cycle: stall.cycle, busy: false, op: null, pred: null,
-            stall: true, stallColor: stall.color,
+            stall: true, stallReason: reason,
+            stallPriority: STALL_PRIORITY.wavelet,
+            stallType: "wavelet",
           });
           if (stall.cycle < minCycle) minCycle = stall.cycle;
           if (stall.cycle > maxCycle) maxCycle = stall.cycle;
+        }
+        return;
+      }
+
+      const pipeStall = parsePipeStall(line);
+      if (pipeStall) {
+        const key = `${pipeStall.x},${pipeStall.y}`;
+        const state = `S:${pipeStall.label}`;
+        if (prevStallState.get(key) !== state) {
+          prevStallState.set(key, state);
+          if (!peStateTemp.has(key)) peStateTemp.set(key, []);
+          peStateTemp.get(key).push({
+            cycle: pipeStall.cycle, busy: false, op: null, pred: null,
+            stall: true, stallReason: pipeStall.label,
+            stallPriority: pipeStall.priority,
+            stallType: "pipeline",
+          });
+          if (pipeStall.cycle < minCycle) minCycle = pipeStall.cycle;
+          if (pipeStall.cycle > maxCycle) maxCycle = pipeStall.cycle;
         }
         return;
       }
@@ -229,10 +269,12 @@ export class TraceParser {
         const state = ex.busy ? `1:${ex.pred || ""}:${ex.op}` : "0";
         if (prevExState.get(key) !== state) {
           prevExState.set(key, state);
+          prevStallState.delete(key);
           if (!peStateTemp.has(key)) peStateTemp.set(key, []);
           peStateTemp.get(key).push({
             cycle: ex.cycle, busy: ex.busy, op: ex.op, pred: ex.pred,
-            stall: false, stallColor: 0,
+            stall: false, stallReason: null, stallPriority: 99,
+            stallType: null,
           });
           if (ex.cycle < minCycle) minCycle = ex.cycle;
           if (ex.cycle > maxCycle) maxCycle = ex.cycle;
@@ -284,15 +326,6 @@ export class TraceParser {
     }
     if (onProgress && lastPct < 100) onProgress(100);
 
-    // Close any stall ranges still active at end of trace
-    for (const [key, active] of stallActive) {
-      if (!peStallIndex.has(key)) peStallIndex.set(key, []);
-      peStallIndex.get(key).push({
-        startCycle: active.startCycle, endCycle: active.lastCycle,
-        color: active.color, src: active.src, queue: active.queue,
-      });
-    }
-
     // Compact peStateIndex into typed arrays
     const peStateIndex = new Map();
     for (const [key, events] of peStateTemp) {
@@ -302,7 +335,9 @@ export class TraceParser {
       const ops = new Array(len);
       const preds = new Array(len);
       const stall = new Uint8Array(len);
-      const stallColors = new Uint16Array(len);
+      const stallReasons = new Array(len);
+      const stallPriorities = new Uint8Array(len);
+      const stallTypes = new Array(len);
       for (let i = 0; i < len; i++) {
         const e = events[i];
         cycles[i] = e.cycle;
@@ -310,9 +345,11 @@ export class TraceParser {
         ops[i] = e.op;
         preds[i] = e.pred;
         stall[i] = e.stall ? 1 : 0;
-        stallColors[i] = e.stallColor || 0;
+        stallReasons[i] = e.stallReason;
+        stallPriorities[i] = e.stallPriority;
+        stallTypes[i] = e.stallType;
       }
-      peStateIndex.set(key, { cycles, busy, ops, preds, stall, stallColors, length: len });
+      peStateIndex.set(key, { cycles, busy, ops, preds, stall, stallReasons, stallPriorities, stallTypes, length: len });
     }
 
     // Compact wavelet hops into typed arrays
@@ -346,7 +383,6 @@ export class TraceParser {
       dimY,
       landingsByCycle,
       peStateIndex,
-      peStallIndex,
       waveletIndex,
       hasWaveletData,
       minCycle,

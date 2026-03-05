@@ -145,7 +145,8 @@ export class PE {
     this.active = false;
     this.op = null;
     this.selected = false;
-    this.stall = null; // null, "wavelet", or future: "pipeline"
+    this.stall = null; // null, "wavelet", or "pipeline"
+    this.stallReason = null; // compact label: "C6", "A0", "R3", "MEM", "S1DS0"
   }
 
   setBusy(busy, op, stall) {
@@ -156,6 +157,7 @@ export class PE {
     this.active = false;
     this.op = isNop ? null : (op || null);
     this.stall = stall || null;
+    this.stallReason = null;
   }
 
   activate(now) {
@@ -194,9 +196,12 @@ export class PE {
     const b = this.brightness;
     const baseAlpha = 0.3 + b * 0.7;
 
-    if (this.stall && !this.op) {
-      // Stalled and not executing: dark purple tint
-      ctx.fillStyle = `rgba(${40 + b * 60}, ${20 + b * 20}, ${50 + b * 80}, ${baseAlpha})`;
+    if (this.stall === "wavelet" && !this.op) {
+      // Wavelet stall: purple tint
+      ctx.fillStyle = `rgba(${55 + b * 75}, ${20 + b * 20}, ${70 + b * 110}, ${baseAlpha})`;
+    } else if (this.stall && !this.op) {
+      // Pipeline stall: muted reddish-brown tint
+      ctx.fillStyle = `rgba(${70 + b * 100}, ${30 + b * 30}, ${20 + b * 20}, ${baseAlpha})`;
     } else {
       // Normal (executing or idle): blue tint
       ctx.fillStyle = `rgba(${45 + b * 55}, ${58 + b * 123}, ${90 + b * 156}, ${baseAlpha})`;
@@ -207,6 +212,20 @@ export class PE {
       ctx.strokeStyle = "#ff9800";
       ctx.lineWidth = 2;
       ctx.strokeRect(this.x, this.y, this.size, this.size);
+    }
+
+    if (!this.op && this.stallReason) {
+      const cx = this.x + this.size / 2;
+      const cy = this.y + this.size / 2;
+      const fontSize = Math.min(this.size * 0.25, (this.size * 1.2) / this.stallReason.length);
+      ctx.font = `${fontSize}px monospace`;
+      ctx.fillStyle = this.stall === "wavelet"
+        ? "rgba(200, 180, 220, 0.7)"   // lavender for wavelet stalls
+        : "rgba(230, 200, 150, 0.7)";  // light orange for pipeline stalls
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(this.stallReason, cx, cy);
+      return;
     }
 
     if (b <= PE_BRIGHTNESS_THRESHOLD) return;

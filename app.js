@@ -4,7 +4,7 @@ import { runAllReduce, spmvPattern, conjugateGradient } from "./algorithms.js";
 import {
   initReplay, setReplayGrid, getReplayState, getIsScrubbing,
   updateReplayTick, togglePlayback, adjustSpeed,
-  seekToCycle, cancelReplay, handleTraceFile, setupScrubListeners,
+  cancelReplay, handleTraceFile, setupScrubListeners,
   selectPE, deselectPE,
 } from "./replay-controller.js";
 import { GRID_ROWS, GRID_COLS, CELL_SIZE, GAP } from "./constants.js";

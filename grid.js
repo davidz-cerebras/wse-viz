@@ -65,10 +65,11 @@ export class Grid {
     if (pe) pe.setBusy(busy, op, stall);
   }
 
-  setPEStall(row, col, stall) {
+  setPEStall(row, col, stall, reason) {
     const pe = this.getPE(row, col);
     if (pe) {
       pe.stall = stall || null;
+      pe.stallReason = reason || null;
       if (stall) pe.brightness = Math.max(pe.brightness, 0.25);
     }
   }

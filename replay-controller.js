@@ -105,30 +105,24 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
     );
     if (found >= 0) {
       let exIdx = -1;
+      let stallIdx = -1;
       for (let i = found; i >= 0; i--) {
         if (!entry.stall[i]) { exIdx = i; break; }
+        if (stallIdx < 0) stallIdx = i;
       }
+      const [x, y] = key.split(",").map(Number);
+      const { row, col } = TraceParser.toGridCoords(x, y, td.dimY);
       if (exIdx >= 0) {
-        const [x, y] = key.split(",").map(Number);
-        const { row, col } = TraceParser.toGridCoords(x, y, td.dimY);
         grid.setPEBusy(row, col, !!entry.busy[exIdx], entry.ops[exIdx], null);
       }
-    }
-  }
-
-  // 2. Overlay stall state from peStallIndex ranges
-  for (const [key, ranges] of td.peStallIndex) {
-    for (const range of ranges) {
-      if (targetCycle >= range.startCycle && targetCycle <= range.endCycle) {
-        const [x, y] = key.split(",").map(Number);
-        const { row, col } = TraceParser.toGridCoords(x, y, td.dimY);
-        grid.setPEStall(row, col, "wavelet");
-        break;
+      // Apply stall overlay if the most recent event is a stall
+      if (stallIdx >= 0 && (exIdx < 0 || stallIdx > exIdx)) {
+        grid.setPEStall(row, col, entry.stallTypes[stallIdx] || "pipeline", entry.stallReasons[stallIdx]);
       }
     }
   }
 
-  // 3. Create packets for in-flight wavelets or DataPackets for old traces
+  // 2. Create packets for in-flight wavelets or DataPackets for old traces
   if (td.hasWaveletData) {
     for (const [, wv] of td.waveletIndex) {
       const firstCycle = wv.hops.cycles[0];
@@ -138,7 +132,7 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
       for (const waypoints of branches) {
         const branchEnd = waypoints[waypoints.length - 1].cycle;
         if (branchEnd < targetCycle) continue;
-        const pkt = new TracedPacket(waypoints, td.dimY);
+        const pkt = new TracedPacket(waypoints, td.dimY, wv.color);
         pkt.setCycle(targetCycle);
         pkt.setFractionalCycle(targetCycle);
         grid.packets.push(pkt);
@@ -169,28 +163,31 @@ export function selectPE(row, col, traceX, traceY) {
   const { minCycle, maxCycle } = replay.state;
   const totalCycles = maxCycle - minCycle + 1;
 
-  // Build flat per-cycle state arrays for both pipeline stages:
-  //   E stage (Execute): busyArr + opArr
-  //   C stage (CalcAddr): stallArr + stallColorArr
+  // Build flat per-cycle state arrays:
+  //   E stage (Execute): busyArr + opArr + predArr
+  //   Stalls: stallReasonArr (compact notation string or null)
   const busyArr = new Uint8Array(totalCycles);
   const opArr = new Array(totalCycles).fill(null);
   const predArr = new Array(totalCycles).fill(null);
-  const stallArr = new Uint8Array(totalCycles);
-  const stallColorArr = new Array(totalCycles).fill(null);
+  const stallReasonArr = new Array(totalCycles).fill(null);
 
-  // Fill E stage from EX OP events (forward-carry)
+  // Fill from peStateIndex events (forward-carry)
   if (entry) {
     let evtIdx = 0;
     let curBusy = 0;
     let curOp = null;
     let curPred = null;
+    let curStallReason = null;
     for (let i = 0; i < totalCycles; i++) {
       const cycle = minCycle + i;
       while (evtIdx < entry.length && entry.cycles[evtIdx] <= cycle) {
-        if (!entry.stall[evtIdx]) {
+        if (entry.stall[evtIdx]) {
+          curStallReason = entry.stallReasons[evtIdx];
+        } else {
           curBusy = entry.busy[evtIdx];
           curOp = entry.ops[evtIdx];
           curPred = entry.preds[evtIdx];
+          curStallReason = null;
         }
         evtIdx++;
       }
@@ -199,17 +196,7 @@ export function selectPE(row, col, traceX, traceY) {
         opArr[i] = curOp;
         predArr[i] = curPred;
       }
-    }
-  }
-
-  // Fill C stage from peStallIndex ranges
-  const stallRanges = replay.traceData.peStallIndex.get(key) || [];
-  for (const range of stallRanges) {
-    const start = Math.max(0, range.startCycle - minCycle);
-    const end = Math.min(totalCycles - 1, range.endCycle - minCycle);
-    for (let i = start; i <= end; i++) {
-      stallArr[i] = 1;
-      stallColorArr[i] = range.color;
+      stallReasonArr[i] = curStallReason;
     }
   }
 
@@ -222,7 +209,7 @@ export function selectPE(row, col, traceX, traceY) {
     }
   }
 
-  selectedPE = { row, col, traceX, traceY, minCycle, totalCycles, busyArr, stallArr, stallColorArr, opArr, predArr, opCounts };
+  selectedPE = { row, col, traceX, traceY, minCycle, totalCycles, busyArr, stallReasonArr, opArr, predArr, opCounts };
 
   // Update panel header
   els.tracePanel.querySelector("h2").textContent = `P${traceX}.${traceY} Trace`;
@@ -306,7 +293,7 @@ function updateOpChartHighlight() {
 
 function renderPETraceWindow(centerCycle) {
   if (!selectedPE) return;
-  const { minCycle, totalCycles, busyArr, stallArr, stallColorArr, opArr, predArr } = selectedPE;
+  const { minCycle, totalCycles, busyArr, stallReasonArr, opArr, predArr } = selectedPE;
 
   const centerIdx = Math.max(0, Math.min(centerCycle - minCycle, totalCycles - 1));
   const halfWin = Math.floor(PE_TRACE_WINDOW / 2);
@@ -326,7 +313,7 @@ function renderPETraceWindow(centerCycle) {
   for (let i = startIdx; i < endIdx; i++) {
     const cycle = minCycle + i;
     const busy = busyArr[i];
-    const stalled = stallArr[i];
+    const stallReason = stallReasonArr[i];
     const entry = document.createElement("div");
     entry.className = "trace-entry trace-pipeline";
     entry.dataset.cycle = cycle;
@@ -336,10 +323,10 @@ function renderPETraceWindow(centerCycle) {
     cycleSpan.textContent = `@${cycle}`;
     entry.appendChild(cycleSpan);
 
-    // C stage (CalcAddr/operand fetch)
+    // Stall reason
     const cSpan = document.createElement("span");
-    cSpan.className = stalled ? "trace-pipe-stage trace-stall" : "trace-pipe-stage trace-pipe-empty";
-    cSpan.textContent = stalled ? `STALL C${stallColorArr[i]}` : "\u2014";
+    cSpan.className = stallReason ? "trace-pipe-stage trace-stall" : "trace-pipe-stage trace-pipe-empty";
+    cSpan.textContent = stallReason || "\u2014";
     entry.appendChild(cSpan);
 
     // Predicate prefix
