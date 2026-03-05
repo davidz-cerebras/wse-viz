@@ -13,6 +13,8 @@ const SYMBOLIC_OPS = {
   FMOV32: { symbol: "MOV", sub: "F32" },
   FMOVS:  { symbol: "MOV", sub: "F32" },
   FSTDPAS:{ symbol: "ST", sub: "F32" },
+  FSTDPAE:{ symbol: "ST", sub: "F32" },
+  FSTDPAH:{ symbol: "ST", sub: "F16" },
   FABSS:  { symbol: "ABS", sub: "F32" },
   FNEGS:  { symbol: "\u2212", sub: "F32" },
   FMAXS:  { symbol: "MAX", sub: "F32" },

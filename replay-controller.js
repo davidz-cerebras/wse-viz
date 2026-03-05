@@ -117,7 +117,9 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
       }
       // Apply stall overlay if the most recent event is a stall
       if (stallIdx >= 0 && (exIdx < 0 || stallIdx > exIdx)) {
-        grid.setPEStall(row, col, entry.stallTypes[stallIdx] || "pipeline", entry.stallReasons[stallIdx]);
+        const reasons = entry.stallReasons[stallIdx];
+        const primary = reasons[0];
+        grid.setPEStall(row, col, primary.type, primary.reason);
       }
     }
   }
@@ -165,7 +167,7 @@ export function selectPE(row, col, traceX, traceY) {
 
   // Build flat per-cycle state arrays:
   //   E stage (Execute): busyArr + opArr + predArr
-  //   Stalls: stallReasonArr (compact notation string or null)
+  //   Stalls: stallReasonArr (array of {reason, type} objects, or null)
   const busyArr = new Uint8Array(totalCycles);
   const opArr = new Array(totalCycles).fill(null);
   const predArr = new Array(totalCycles).fill(null);
@@ -313,7 +315,7 @@ function renderPETraceWindow(centerCycle) {
   for (let i = startIdx; i < endIdx; i++) {
     const cycle = minCycle + i;
     const busy = busyArr[i];
-    const stallReason = stallReasonArr[i];
+    const stallReasons = stallReasonArr[i];
     const entry = document.createElement("div");
     entry.className = "trace-entry trace-pipeline";
     entry.dataset.cycle = cycle;
@@ -323,10 +325,17 @@ function renderPETraceWindow(centerCycle) {
     cycleSpan.textContent = `@${cycle}`;
     entry.appendChild(cycleSpan);
 
-    // Stall reason
+    // Stall reason (show first reason, ellipsis if multiple)
     const cSpan = document.createElement("span");
-    cSpan.className = stallReason ? "trace-pipe-stage trace-stall" : "trace-pipe-stage trace-pipe-empty";
-    cSpan.textContent = stallReason || "\u2014";
+    if (stallReasons) {
+      cSpan.className = "trace-pipe-stage trace-stall";
+      cSpan.textContent = stallReasons.length > 1
+        ? stallReasons[0].reason + "\u2026"
+        : stallReasons[0].reason;
+    } else {
+      cSpan.className = "trace-pipe-stage trace-pipe-empty";
+      cSpan.textContent = "\u2014";
+    }
     entry.appendChild(cSpan);
 
     // Predicate prefix

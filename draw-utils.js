@@ -1,5 +1,7 @@
 import { PACKET_RADIUS, PACKET_COLOR, PACKET_HALO_COLOR } from "./constants.js";
 
+// "color" is a fabric routing tag (an integer), not a visual color.
+// It is rendered as a small numeric label inside the dot.
 export function drawPacketDot(ctx, x, y, color) {
   ctx.beginPath();
   ctx.arc(x, y, PACKET_RADIUS, 0, Math.PI * 2);

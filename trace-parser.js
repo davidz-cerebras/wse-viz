@@ -133,21 +133,18 @@ function parseWaveletStall(line) {
   };
 }
 
-// Priority order: wavelet (C) > accum (A) > register (R) > memory (MEM) > DSR (S*DS*)
-const STALL_PRIORITY = { wavelet: 0, accum: 1, register: 2, memory: 3, dsr: 4 };
-
 function classifyPipeStall(msg) {
   const accumMatch = msg.match(/^dependent accum(\d)/);
-  if (accumMatch) return { kind: "accum", label: `A${accumMatch[1]}`, priority: STALL_PRIORITY.accum };
+  if (accumMatch) return { label: `A${accumMatch[1]}` };
 
   const regMatch = msg.match(/^(R\d+) ilock/);
-  if (regMatch) return { kind: "register", label: regMatch[1], priority: STALL_PRIORITY.register };
+  if (regMatch) return { label: regMatch[1] };
 
   if (msg.startsWith("write_pending/read conflict MEM"))
-    return { kind: "memory", label: "MEM", priority: STALL_PRIORITY.memory };
+    return { label: "MEM" };
 
   const dsrMatch = msg.match(/^dependent (S\dDS\d)/);
-  if (dsrMatch) return { kind: "dsr", label: dsrMatch[1], priority: STALL_PRIORITY.dsr };
+  if (dsrMatch) return { label: dsrMatch[1] };
 
   return null;
 }
@@ -177,11 +174,30 @@ export class TraceParser {
 
     const dimRegex = /^@\d+ dimX=(\d+), dimY=(\d+)/;
     const prevExState = new Map();
-    const prevStallState = new Map();
     const peStateTemp = new Map();   // temporary: arrays of objects
     const waveletTemp = new Map();   // ident → { ident, color, ctrl, hops: [] }
     const landingsByCycle = new Map();
     let hasWaveletData = false;
+
+    // Accumulate stall reasons: if the last event for this PE is a stall
+    // at the same cycle, append to it; otherwise create a new stall event.
+    const addStall = (key, cycle, reason, type) => {
+      if (!peStateTemp.has(key)) peStateTemp.set(key, []);
+      const events = peStateTemp.get(key);
+      const last = events.length > 0 ? events[events.length - 1] : null;
+      if (last && last.stall && last.cycle === cycle) {
+        // Same PE, same cycle: accumulate if not already present
+        if (!last.stallReasons.some(r => r.reason === reason))
+          last.stallReasons.push({ reason, type });
+        return;
+      }
+      events.push({
+        cycle, busy: false, op: null, pred: null,
+        stall: true, stallReasons: [{ reason, type }],
+      });
+      if (cycle < minCycle) minCycle = cycle;
+      if (cycle > maxCycle) maxCycle = cycle;
+    };
 
     const processLine = (line) => {
       if (dimX === 0) {
@@ -208,7 +224,6 @@ export class TraceParser {
       if (wv) {
         hasWaveletData = true;
         totalEvents++;
-
         let entry = waveletTemp.get(wv.ident);
         if (!entry) {
           entry = { ident: wv.ident, color: wv.color, ctrl: wv.ctrl, hops: [] };
@@ -226,40 +241,15 @@ export class TraceParser {
 
       const stall = parseWaveletStall(line);
       if (stall) {
-        const key = `${stall.x},${stall.y}`;
-        const reason = `C${stall.color}`;
-        const state = `S:${reason}`;
-        if (prevStallState.get(key) !== state) {
-          prevStallState.set(key, state);
-          if (!peStateTemp.has(key)) peStateTemp.set(key, []);
-          peStateTemp.get(key).push({
-            cycle: stall.cycle, busy: false, op: null, pred: null,
-            stall: true, stallReason: reason,
-            stallPriority: STALL_PRIORITY.wavelet,
-            stallType: "wavelet",
-          });
-          if (stall.cycle < minCycle) minCycle = stall.cycle;
-          if (stall.cycle > maxCycle) maxCycle = stall.cycle;
-        }
+        addStall(`${stall.x},${stall.y}`, stall.cycle,
+          `C${stall.color}`, "wavelet");
         return;
       }
 
       const pipeStall = parsePipeStall(line);
       if (pipeStall) {
-        const key = `${pipeStall.x},${pipeStall.y}`;
-        const state = `S:${pipeStall.label}`;
-        if (prevStallState.get(key) !== state) {
-          prevStallState.set(key, state);
-          if (!peStateTemp.has(key)) peStateTemp.set(key, []);
-          peStateTemp.get(key).push({
-            cycle: pipeStall.cycle, busy: false, op: null, pred: null,
-            stall: true, stallReason: pipeStall.label,
-            stallPriority: pipeStall.priority,
-            stallType: "pipeline",
-          });
-          if (pipeStall.cycle < minCycle) minCycle = pipeStall.cycle;
-          if (pipeStall.cycle > maxCycle) maxCycle = pipeStall.cycle;
-        }
+        addStall(`${pipeStall.x},${pipeStall.y}`, pipeStall.cycle,
+          pipeStall.label, "pipeline");
         return;
       }
 
@@ -269,12 +259,10 @@ export class TraceParser {
         const state = ex.busy ? `1:${ex.pred || ""}:${ex.op}` : "0";
         if (prevExState.get(key) !== state) {
           prevExState.set(key, state);
-          prevStallState.delete(key);
           if (!peStateTemp.has(key)) peStateTemp.set(key, []);
           peStateTemp.get(key).push({
             cycle: ex.cycle, busy: ex.busy, op: ex.op, pred: ex.pred,
-            stall: false, stallReason: null, stallPriority: 99,
-            stallType: null,
+            stall: false, stallReasons: null,
           });
           if (ex.cycle < minCycle) minCycle = ex.cycle;
           if (ex.cycle > maxCycle) maxCycle = ex.cycle;
@@ -336,8 +324,6 @@ export class TraceParser {
       const preds = new Array(len);
       const stall = new Uint8Array(len);
       const stallReasons = new Array(len);
-      const stallPriorities = new Uint8Array(len);
-      const stallTypes = new Array(len);
       for (let i = 0; i < len; i++) {
         const e = events[i];
         cycles[i] = e.cycle;
@@ -345,11 +331,9 @@ export class TraceParser {
         ops[i] = e.op;
         preds[i] = e.pred;
         stall[i] = e.stall ? 1 : 0;
-        stallReasons[i] = e.stallReason;
-        stallPriorities[i] = e.stallPriority;
-        stallTypes[i] = e.stallType;
+        stallReasons[i] = e.stallReasons; // array of {reason, type} or null
       }
-      peStateIndex.set(key, { cycles, busy, ops, preds, stall, stallReasons, stallPriorities, stallTypes, length: len });
+      peStateIndex.set(key, { cycles, busy, ops, preds, stall, stallReasons, length: len });
     }
 
     // Compact wavelet hops into typed arrays
