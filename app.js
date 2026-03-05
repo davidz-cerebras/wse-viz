@@ -3,7 +3,7 @@ import { AnimationLoop } from "./animation.js";
 import { runAllReduce, spmvPattern, conjugateGradient } from "./algorithms.js";
 import {
   initReplay, setReplayGrid, getReplayState, getIsScrubbing,
-  updateReplayTick, resumePlayback, togglePlayback, adjustSpeed,
+  updateReplayTick, togglePlayback, adjustSpeed,
   seekToCycle, cancelReplay, handleTraceFile, setupScrubListeners,
   selectPE, deselectPE,
 } from "./replay-controller.js";
@@ -122,6 +122,14 @@ function setupEventListeners() {
       adjustSpeed(0.5);
     }
   });
+  // Prevent Space keyup from triggering a click on any focused button.
+  // Our Space handling is fully in keydown above; the native keyup-click
+  // would fire startSimulation/etc. if those buttons happen to have focus.
+  document.addEventListener("keyup", (e) => {
+    if (e.code === "Space" && e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA") {
+      e.preventDefault();
+    }
+  });
 }
 
 function startAlgorithm() {
@@ -232,10 +240,12 @@ function resizeCanvas() {
   const newW = Math.round(displayW);
   const newH = Math.round(displayH);
 
-  // Only reset the canvas buffer if dimensions actually changed
-  // (setting canvas.width/height clears the buffer and resets context state)
-  if (canvas.width !== newW || canvas.height !== newH) {
-    canvasScale = displayW / gridNaturalWidth;
+  // Re-apply if the canvas pixel dimensions changed OR the scale changed
+  // (same-aspect-ratio grid transitions produce identical pixel dimensions
+  // but need a different transform scale for the new gridNaturalWidth).
+  const newScale = displayW / gridNaturalWidth;
+  if (canvas.width !== newW || canvas.height !== newH || canvasScale !== newScale) {
+    canvasScale = newScale;
     canvas.width = newW;
     canvas.height = newH;
     canvas.style.width = `${newW}px`;

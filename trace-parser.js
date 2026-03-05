@@ -132,7 +132,7 @@ function parseWaveletStall(line) {
 }
 
 export class TraceParser {
-  static async index(file) {
+  static async index(file, onProgress) {
     let dimX = 0;
     let dimY = 0;
     let minCycle = Infinity;
@@ -246,6 +246,14 @@ export class TraceParser {
       .getReader();
     let partial = "";
 
+    // Progress tracking: yield to the event loop periodically so the
+    // browser can repaint the progress indicator. Byte count is tracked
+    // from decoded text length (trace files are pure ASCII).
+    const totalBytes = file.size;
+    let bytesRead = 0;
+    let lastPct = -1;
+    let linesSinceYield = 0;
+
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -256,12 +264,25 @@ export class TraceParser {
 
       for (const line of lines) {
         processLine(line);
+        if (onProgress) {
+          bytesRead += line.length + 1;
+          if (++linesSinceYield >= 1000) {
+            linesSinceYield = 0;
+            const pct = Math.round((bytesRead / totalBytes) * 100);
+            if (pct !== lastPct) {
+              lastPct = pct;
+              onProgress(pct);
+              await new Promise(resolve => setTimeout(resolve, 0));
+            }
+          }
+        }
       }
     }
 
     if (partial.length > 0) {
       processLine(partial);
     }
+    if (onProgress && lastPct < 100) onProgress(100);
 
     // Close any stall ranges still active at end of trace
     for (const [key, active] of stallActive) {

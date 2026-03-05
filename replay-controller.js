@@ -579,11 +579,27 @@ export async function handleTraceFile(event, setGrid) {
 
   const myGen = ++handleTraceGeneration;
 
-  const traceData = await TraceParser.index(file);
+  // Null out stale replay/trace state so playback controls are inert during
+  // indexing, and so a thrown exception doesn't leave stale traceData behind.
+  replay.state = null;
+  replay.traceData = null;
+
+  // Show only the playback bar for progress text — don't call showPanel("trace")
+  // yet, since that triggers resizeCanvas on the old grid.
+  els.playbackBar.classList.remove("hidden");
+  els.cycleDisplay.textContent = "Indexing\u2026";
+
+  const traceData = await TraceParser.index(file, (pct) => {
+    if (myGen !== handleTraceGeneration) return;
+    els.cycleDisplay.textContent = `Indexing\u2026 ${pct}%`;
+  });
   if (myGen !== handleTraceGeneration) return;
 
   if (traceData.dimX === 0 || traceData.dimY === 0 || traceData.minCycle > traceData.maxCycle) {
     els.cycleDisplay.textContent = "Error: invalid trace file";
+    els.playbackBar.classList.add("hidden");
+    deselectPE();
+    replay.traceData = null;
     return;
   }
 
