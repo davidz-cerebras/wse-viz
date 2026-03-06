@@ -94,8 +94,10 @@ function parseWavelet(line) {
   if (depStr[1] !== " ") departing.push("N");
   if (depStr[2] !== " ") departing.push("W");
   if (depStr[3] !== " ") departing.push("S");
-  // depStr[4] is unused/reserved
+  // depStr[4] is the R (CE ramp) direction — intentionally not tracked because
+  // ramp delivery is local to the PE (no visual hop to another tile to draw).
 
+  const csMatch = line.match(/colorswap from C(\d+)/);
   return {
     cycle: parseInt(m[1]),
     x: parseInt(m[2]),
@@ -108,7 +110,7 @@ function parseWavelet(line) {
     ident: m[9],
     landing: m[10],
     departing,
-    colorswap: line.includes("colorswap from C") ? parseInt(line.match(/colorswap from C(\d+)/)[1]) : null,
+    colorswap: csMatch ? parseInt(csMatch[1]) : null,
     lf: line.includes(", lf=1"),
     noCe: line.includes("no_ce"),
     toCe: line.includes("to_ce_from_q"),
