@@ -97,13 +97,23 @@
         </div>
       </main>
       <div class="playback-bar hidden" id="playbackBar">
-        <button id="playPauseBtn" class="icon-btn" title="Play/Pause">&#9654;</button>
-        <input type="range" id="scrubBar" min="0" max="0" value="0" />
-        <span id="cycleDisplay" class="cycle-display"></span>
-        <button id="speedDown" class="icon-btn speed-btn" title="Halve speed">&minus;</button>
-        <span id="speedDisplay" class="speed-display">4 cyc/s</span>
-        <button id="speedUp" class="icon-btn speed-btn" title="Double speed">+</button>
-        <button id="resetZoomBtn" class="btn reset-zoom-btn hidden">Reset Zoom</button>
+        <div id="loadingBar" class="loading-bar hidden">
+          <span id="loadingLabel" class="loading-label">Loading…</span>
+          <div class="loading-track">
+            <div id="loadingFill" class="loading-fill"></div>
+          </div>
+          <span id="loadingPct" class="loading-pct">0%</span>
+        </div>
+        <div id="playbackControls" class="playback-controls">
+          <button id="playPauseBtn" class="icon-btn" title="Play/Pause">&#9654;</button>
+          <input type="range" id="scrubBar" min="0" max="0" value="0" />
+          <span id="cycleDisplay" class="cycle-display"></span>
+          <button id="speedDown" class="icon-btn speed-btn" title="Halve speed">&minus;</button>
+          <span id="speedDisplay" class="speed-display">4 Hz</span>
+          <button id="speedUp" class="icon-btn speed-btn" title="Double speed">+</button>
+          <button id="undoZoomBtn" class="btn reset-zoom-btn hidden">Undo Zoom</button>
+          <button id="resetZoomBtn" class="btn reset-zoom-btn hidden">Reset Zoom</button>
+        </div>
       </div>
     </div>
     <script type="module" src="app.js"></script>

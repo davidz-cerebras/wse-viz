@@ -36,24 +36,31 @@ self.onmessage = async (e) => {
     let completed = 0;
     let error = null;
 
+    const workers = [];
     await new Promise((resolve, reject) => {
       for (let i = 0; i < NUM_WORKERS; i++) {
         const startByte = Math.floor(file.size * i / NUM_WORKERS);
         const endByte = Math.floor(file.size * (i + 1) / NUM_WORKERS);
         const worker = new Worker("trace-segment-worker.js", { type: "module" });
+        workers.push(worker);
+
+        worker.onerror = (err) => {
+          workers.forEach(w => w.terminate());
+          if (!error) { error = err.message || "segment worker failed"; reject(new Error(error)); }
+        };
 
         worker.onmessage = (ev) => {
           const msg = ev.data;
 
           if (msg.type === "progress") {
             segProgress[msg.segmentIndex] = msg.pct;
-            const overall = Math.round(segProgress.reduce((a, b) => a + b, 0) / NUM_WORKERS);
+            const overall = segProgress.reduce((a, b) => a + b, 0) / NUM_WORKERS;
             self.postMessage({ type: "progress", pct: overall });
             return;
           }
 
           if (msg.type === "error") {
-            worker.terminate();
+            workers.forEach(w => w.terminate());
             if (!error) { error = msg.message; reject(new Error(msg.message)); }
             return;
           }
@@ -70,9 +77,11 @@ self.onmessage = async (e) => {
       }
     });
 
-    // Merge all segments
-    self.postMessage({ type: "progress", pct: 100 });
-    const traceData = TraceParser.mergeSegments(segments);
+    // Merge all segments — this can take several seconds for large traces
+    const traceData = TraceParser.mergeSegments(segments, (step, pct) => {
+      self.postMessage({ type: "merging", step, pct });
+    });
+    self.postMessage({ type: "transferring" });
     postResult(traceData);
   } catch (err) {
     self.postMessage({ type: "error", message: err.message });

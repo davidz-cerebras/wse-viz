@@ -272,7 +272,7 @@ export class PE {
     } else {
       const fontSize = Math.min(this.size * 0.25, (this.size * 1.2) / this.op.length);
       ctx.font = `${fontSize}px sans-serif`;
-      ctx.fillStyle = `rgba(200, 200, 255, ${b * 0.8})`;
+      ctx.fillStyle = `rgba(255, 255, 255, ${b * 0.85})`;
       ctx.textBaseline = "middle";
       ctx.fillText(this.op, cx, cy);
     }

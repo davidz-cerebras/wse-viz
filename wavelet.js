@@ -219,10 +219,12 @@ function _rampPos(grid, x, y, dimY, dir, isOnRamp) {
  * Between integer cycles the position is interpolated for smooth animation.
  */
 export class TracedPacket {
-  constructor(waypoints, dimY, color) {
+  constructor(waypoints, dimY, color, ctrl, lf) {
     this.waypoints = waypoints;
     this.dimY = dimY;
     this.color = color;
+    this.ctrl = ctrl;   // true = control wavelet, false = data wavelet
+    this.lf = lf;       // true = last-in-flight
     this.startCycle = waypoints[0].cycle;
     this.endCycle = waypoints[waypoints.length - 1].cycle;
     this.currentCycle = this.startCycle;
@@ -308,6 +310,6 @@ export class TracedPacket {
     if (!this.visible) return;
     const pos = this.getCurrentPosition(currentTime, grid);
     if (!pos) return;
-    drawPacketDot(ctx, pos.x, pos.y, this.color);
+    drawPacketDot(ctx, pos.x, pos.y, this.color, this.ctrl, this.lf);
   }
 }

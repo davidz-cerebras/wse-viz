@@ -166,6 +166,9 @@ export class Grid {
     // Packets: let canvas clipping handle off-viewport ones (few packets, negligible cost)
     for (const packet of this.packets) packet.draw(ctx, now, this);
 
+    // Corner PE labels (e.g., "P0.0") — helps orient when zoomed in
+    this._drawCornerLabels(ctx, minR, maxR, minC, maxC);
+
     // Draw zoom preview: tint each selected PE during Shift+drag
     if (this.zoomPreview) {
       const zp = this.zoomPreview;
@@ -297,6 +300,36 @@ export class Grid {
       }
     }
     return active;
+  }
+
+  _drawCornerLabels(ctx, minR, maxR, minC, maxC) {
+    const fontSize = Math.min(this.gap * 0.7, 6);
+    if (fontSize < 2) return; // too small to read
+    ctx.font = `${fontSize}px sans-serif`;
+    ctx.fillStyle = "rgba(180, 190, 210, 0.6)";
+
+    const step = this.cellSize + this.gap;
+    const g = this.gap;
+    // Position labels in the margin outside the PE bounding box.
+    // The viewport includes a gap-width margin on all sides.
+    const left = minC * step + g / 2;
+    const right = maxC * step + g + this.cellSize + g / 2;
+    const top = minR * step + g / 2;
+    const bottom = maxR * step + g + this.cellSize + g / 2;
+
+    const corners = [
+      [minR, minC, left,  top,    "left",  "top"],
+      [minR, maxC, right, top,    "right", "top"],
+      [maxR, minC, left,  bottom, "left",  "bottom"],
+      [maxR, maxC, right, bottom, "right", "bottom"],
+    ];
+
+    for (const [row, col, x, y, align, baseline] of corners) {
+      const label = `P${col}.${this.rows - 1 - row}`;
+      ctx.textAlign = align;
+      ctx.textBaseline = baseline;
+      ctx.fillText(label, x, y);
+    }
   }
 
   hasActivity() {

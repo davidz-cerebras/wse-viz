@@ -1,6 +1,5 @@
 const landingRegex =
   /^@(\d+) P(\d+)\.(\d+) \(\w+\) landing C(\d+) from link ([WESNR]),/;
-const exOpRegex = /^@(\d+) P(\d+)\.(\d+):.*\[EX OP\]/;
 const opcodeRegex = /T\d+(?:\.\w+)?\s+(!?(?:CF|p)\d+(?::\d+)?\?)?\s*(\S+)/;
 const waveletStallRegex =
   /^@(\d+) P(\d+)\.(\d+):.*Not enough wavelets \((\d+)\/(\d+)\) (?:for )?(SRC\d) with C(\d+), IN_Q\[(\d+)\], SIMD-(\d+)/;
@@ -36,16 +35,8 @@ export function decodeDeparting(mask) {
   return dirs;
 }
 
-function encodeDeparting(dirs) {
-  let mask = 0;
-  for (const d of dirs) {
-    if (d === "E") mask |= 1;
-    else if (d === "N") mask |= 2;
-    else if (d === "W") mask |= 4;
-    else if (d === "S") mask |= 8;
-  }
-  return mask;
-}
+// encodeDeparting is no longer needed — departing bitmasks are now computed
+// directly in parseWavelet from the depStr characters.
 
 // IO tiles (e.g., "LW36 (iotile)") use a different identifier format than
 // compute tiles ("P<x>.<y> (hwtile)"). We intentionally ignore IO tile events
@@ -70,35 +61,6 @@ function parseLanding(line) {
   };
 }
 
-// parseExOp is intentionally NOT used for the hot path in processLine.
-// EX OP lines are ~68% of all lines and ~98% are IDLE, so processLine
-// uses manual string extraction (indexOf + substring) instead of regex
-// for a ~1.6x speedup on large traces. This function is kept for
-// clarity and potential use outside the hot loop.
-function parseExOp(line) {
-  if (!line.includes("[EX OP]")) return null;
-  const m = line.match(exOpRegex);
-  if (!m) return null;
-  const busy = !line.includes("[EX OP] IDLE");
-  let op = null;
-  let pred = null;
-  if (busy) {
-    const afterExOp = line.split("[EX OP]")[1];
-    const opcodeMatch = afterExOp.match(opcodeRegex);
-    if (opcodeMatch) {
-      pred = opcodeMatch[1] || null;
-      op = opcodeMatch[2];
-    }
-  }
-  return {
-    cycle: parseInt(m[1]),
-    x: parseInt(m[2]),
-    y: parseInt(m[3]),
-    busy,
-    op,
-    pred,
-  };
-}
 
 function parseWavelet(line) {
   if (!line.includes(") wavelet C")) return null;
@@ -110,16 +72,17 @@ function parseWavelet(line) {
   }
 
   // Parse departing directions from 5-slot field: E,N,W,S,_
+  // Encode as bitmask immediately (bit0=E, bit1=N, bit2=W, bit3=S)
+  // to avoid creating string arrays and calling encodeDeparting later.
   const depStr = m[11];
-  const departing = [];
-  if (depStr[0] !== " ") departing.push("E");
-  if (depStr[1] !== " ") departing.push("N");
-  if (depStr[2] !== " ") departing.push("W");
-  if (depStr[3] !== " ") departing.push("S");
+  let departingEncoded = 0;
+  if (depStr[0] !== " ") departingEncoded |= 1;
+  if (depStr[1] !== " ") departingEncoded |= 2;
+  if (depStr[2] !== " ") departingEncoded |= 4;
+  if (depStr[3] !== " ") departingEncoded |= 8;
   // depStr[4] is the R (CE ramp) direction — intentionally not tracked because
   // ramp delivery is local to the PE (no visual hop to another tile to draw).
 
-  const csMatch = line.match(/colorswap from C(\d+)/);
   return {
     cycle: parseInt(m[1]),
     x: parseInt(m[2]),
@@ -128,15 +91,14 @@ function parseWavelet(line) {
     ctrl: m[5] === "1",
     ident: flatStr(m[9]),
     landingEncoded: LANDING_ENCODE[m[10]] ?? 5, // encode immediately to avoid JSC rope retention
-    departing,
-    colorswap: csMatch ? parseInt(csMatch[1]) : null,
-    lf: line.includes(", lf=1"),
+    departingEncoded,
+    lf: line.includes(", lf=1"), // last-in-flight flag (per-wavelet, set at production time)
     // A hop is "consumed" if the wavelet is delivered to the compute element.
     // This is used to visualize multicast-and-consume: when a wavelet is both
-    // forwarded (departing.length > 0) and consumed, we fork the animation
+    // forwarded (departingEncoded > 0) and consumed, we fork the animation
     // so one dot continues onward and another terminates at the PE center.
     consumed: line.includes("to_ce_from_q") || line.includes("to_ce_from_router") ||
-      (m[10] !== "-" && departing.length === 0 && !line.includes("no_ce")),
+      (m[10] !== "-" && departingEncoded === 0 && !line.includes("no_ce")),
   };
 }
 
@@ -208,9 +170,11 @@ export class TraceParser {
     const opIntern = new Map();      // opcode string → uint8 id
     const predIntern = new Map();    // pred string → uint8 id
     opIntern.set(null, 0);          // id 0 = null (no op)
+    opIntern.set("???", 1);         // id 1 = overflow sentinel
     predIntern.set(null, 0);        // id 0 = null (no pred)
-    let nextOpId = 1;
-    let nextPredId = 1;
+    predIntern.set("???", 1);       // id 1 = overflow sentinel
+    let nextOpId = 2;
+    let nextPredId = 2;
     // Wavelet hops stored as flat parallel arrays per ident to avoid
     // millions of {cycle, x, y, landing, departing} JS objects (~1.5GB → ~266MB).
     const waveletTemp = new Map();   // ident → { ident, color, ctrl, cycles:[], xs:[], ys:[], landings:[], departings:[] }
@@ -234,13 +198,19 @@ export class TraceParser {
 
     function internOp(op) {
       let id = opIntern.get(op);
-      if (id === undefined) { id = nextOpId++; opIntern.set(flatStr(op), id); }
+      if (id === undefined) {
+        if (nextOpId > 255) return 1; // overflow → "???" sentinel at id 1
+        id = nextOpId++; opIntern.set(flatStr(op), id);
+      }
       return id;
     }
 
     function internPred(pred) {
       let id = predIntern.get(pred);
-      if (id === undefined) { id = nextPredId++; predIntern.set(flatStr(pred), id); }
+      if (id === undefined) {
+        if (nextPredId > 255) return 1; // overflow → "???" sentinel at id 1
+        id = nextPredId++; predIntern.set(flatStr(pred), id);
+      }
       return id;
     }
 
@@ -286,7 +256,7 @@ export class TraceParser {
         }
       }
 
-      // EX OP hot path: manual string extraction instead of exOpRegex.
+      // EX OP hot path: manual string extraction instead of regex.
       // EX OP is ~68% of all lines, and ~98% of those are IDLE. We avoid
       // the expensive regex by using indexOf + substring + charCodeAt.
       const exIdx = line.indexOf("[EX OP]");
@@ -354,7 +324,7 @@ export class TraceParser {
         totalEvents++;
         let entry = waveletTemp.get(wv.ident);
         if (!entry) {
-          entry = { ident: wv.ident, color: wv.color, ctrl: wv.ctrl,
+          entry = { ident: wv.ident, color: wv.color, ctrl: wv.ctrl, lf: wv.lf,
                     cycles: [], xs: [], ys: [], landings: [], departings: [], consumed: [] };
           waveletTemp.set(wv.ident, entry);
         }
@@ -362,7 +332,7 @@ export class TraceParser {
         entry.xs.push(wv.x);
         entry.ys.push(wv.y);
         entry.landings.push(wv.landingEncoded);
-        entry.departings.push(wv.departing);
+        entry.departings.push(wv.departingEncoded);
         entry.consumed.push(wv.consumed ? 1 : 0);
         return;
       }
@@ -392,7 +362,6 @@ export class TraceParser {
     const decoder = new TextDecoder();
     const totalBytes = file.size;
     let carryover = new Uint8Array(0);
-    let lastPct = -1;
 
     for (let offset = 0; offset < totalBytes; offset += CHUNK_SIZE) {
       const end = Math.min(offset + CHUNK_SIZE, totalBytes);
@@ -429,8 +398,7 @@ export class TraceParser {
       }
 
       if (onProgress) {
-        const pct = Math.round((end / totalBytes) * 100);
-        if (pct !== lastPct) { lastPct = pct; onProgress(pct); }
+        onProgress(end / totalBytes * 100);
       }
     }
 
@@ -438,7 +406,7 @@ export class TraceParser {
     if (carryover.length > 0) {
       processLine(decoder.decode(carryover));
     }
-    if (onProgress && lastPct < 100) onProgress(100);
+    if (onProgress) onProgress(100);
 
     // Build reverse lookup tables for interned opcodes and predicates
     const opLookup = new Array(nextOpId);
@@ -479,13 +447,14 @@ export class TraceParser {
         xs[i] = entry.xs[i];
         ys[i] = entry.ys[i];
         landings[i] = entry.landings[i];
-        departings[i] = encodeDeparting(entry.departings[i]);
+        departings[i] = entry.departings[i]; // already encoded as bitmask
         consumed[i] = entry.consumed[i];
       }
       waveletIndex.set(ident, {
         ident: entry.ident,
         color: entry.color,
         ctrl: entry.ctrl,
+        lf: entry.lf,
         hops: { cycles, xs, ys, landings, departings, consumed, length: len },
       });
     }
@@ -572,9 +541,9 @@ export class TraceParser {
     const tmpLandCycles = [], tmpLandXs = [], tmpLandYs = [], tmpLandColors = [], tmpLandDirs = [];
     let hasWaveletData = false;
 
-    const opIntern = new Map(); opIntern.set(null, 0);
-    const predIntern = new Map(); predIntern.set(null, 0);
-    let nextOpId = 1, nextPredId = 1;
+    const opIntern = new Map(); opIntern.set(null, 0); opIntern.set("???", 1);
+    const predIntern = new Map(); predIntern.set(null, 0); predIntern.set("???", 1);
+    let nextOpId = 2, nextPredId = 2;
 
     function getPEEntry(key) {
       let e = peStateTemp.get(key);
@@ -583,12 +552,18 @@ export class TraceParser {
     }
     function internOp(op) {
       let id = opIntern.get(op);
-      if (id === undefined) { id = nextOpId++; opIntern.set(flatStr(op), id); }
+      if (id === undefined) {
+        if (nextOpId > 255) return 1; // overflow → "???" sentinel at id 1
+        id = nextOpId++; opIntern.set(flatStr(op), id);
+      }
       return id;
     }
     function internPred(pred) {
       let id = predIntern.get(pred);
-      if (id === undefined) { id = nextPredId++; predIntern.set(flatStr(pred), id); }
+      if (id === undefined) {
+        if (nextPredId > 255) return 1; // overflow → "???" sentinel at id 1
+        id = nextPredId++; predIntern.set(flatStr(pred), id);
+      }
       return id;
     }
     const addStall = (key, cycle, reason, type) => {
@@ -612,7 +587,7 @@ export class TraceParser {
           if (cycle < minCycle) minCycle = cycle;
         }
       }
-      if (isFirst && dimX === 0) {
+      if (dimX === 0) {
         const dimMatch = line.match(dimRegex);
         if (dimMatch) { dimX = parseInt(dimMatch[1]); dimY = parseInt(dimMatch[2]); return; }
       }
@@ -666,12 +641,12 @@ export class TraceParser {
         hasWaveletData = true; totalEvents++;
         let entry = waveletTemp.get(wv.ident);
         if (!entry) {
-          entry = { ident: wv.ident, color: wv.color, ctrl: wv.ctrl,
+          entry = { ident: wv.ident, color: wv.color, ctrl: wv.ctrl, lf: wv.lf,
                     cycles: [], xs: [], ys: [], landings: [], departings: [], consumed: [] };
           waveletTemp.set(wv.ident, entry);
         }
         entry.cycles.push(wv.cycle); entry.xs.push(wv.x); entry.ys.push(wv.y);
-        entry.landings.push(wv.landingEncoded); entry.departings.push(wv.departing);
+        entry.landings.push(wv.landingEncoded); entry.departings.push(wv.departingEncoded);
         entry.consumed.push(wv.consumed ? 1 : 0);
         return;
       }
@@ -688,8 +663,15 @@ export class TraceParser {
     const decoder = new TextDecoder();
     const segmentSize = endByte - startByte;
     let carryover = new Uint8Array(0);
-    let lastPct = -1;
-    let skipFirstLine = !isFirst; // non-first segments skip partial first line
+    // Non-first segments skip their first line (it's a partial line that the
+    // previous segment handles by reading past its endByte). BUT if the byte
+    // just before startByte is '\n', the boundary fell on a line edge and the
+    // first line is actually complete — don't skip it.
+    let skipFirstLine = false;
+    if (!isFirst) {
+      const peek = new Uint8Array(await file.slice(startByte - 1, startByte).arrayBuffer());
+      skipFirstLine = peek[0] !== 10; // 10 = '\n'
+    }
 
     for (let offset = startByte; offset < endByte; offset += CHUNK_SIZE) {
       const end = Math.min(offset + CHUNK_SIZE, endByte);
@@ -718,8 +700,7 @@ export class TraceParser {
       for (let i = startI; i < lines.length - 1; i++) processLine(lines[i]);
 
       if (onProgress) {
-        const pct = Math.round(((end - startByte) / segmentSize) * 100);
-        if (pct !== lastPct) { lastPct = pct; onProgress(pct); }
+        onProgress((end - startByte) / segmentSize * 100);
       }
     }
 
@@ -759,7 +740,7 @@ export class TraceParser {
   }
 
   // Merge partial results from N parallel segments into final compacted trace data.
-  static mergeSegments(segments) {
+  static mergeSegments(segments, onMergeProgress) {
     let dimX = 0, dimY = 0, minCycle = Infinity, maxCycle = -Infinity;
     let totalEvents = 0, hasWaveletData = false;
 
@@ -772,10 +753,16 @@ export class TraceParser {
       if (seg.hasWaveletData) hasWaveletData = true;
     }
 
+    // Phase weights calibrated from 27GB trace profiling:
+    //   Merge PE: 0-25%, Compact PE: 25-35%, Merge wav: 35-50%,
+    //   Compact wav: 50-85%, Merge+sort+compact landings: 85-100%
+    const mp = onMergeProgress || (() => {});
+
+    mp("Remapping opcodes\u2026", 0);
     // 2. Build global op/pred intern tables from all segments
-    const globalOpIntern = new Map(); globalOpIntern.set(null, 0);
-    const globalPredIntern = new Map(); globalPredIntern.set(null, 0);
-    let gNextOp = 1, gNextPred = 1;
+    const globalOpIntern = new Map(); globalOpIntern.set(null, 0); globalOpIntern.set("???", 1);
+    const globalPredIntern = new Map(); globalPredIntern.set(null, 0); globalPredIntern.set("???", 1);
+    let gNextOp = 2, gNextPred = 2;
     // segOpRemap[segIdx][localId] = globalId
     const segOpRemap = [];
     const segPredRemap = [];
@@ -784,7 +771,7 @@ export class TraceParser {
       for (let id = 0; id < seg.opLookup.length; id++) {
         const s = seg.opLookup[id];
         let gid = globalOpIntern.get(s);
-        if (gid === undefined) { gid = gNextOp++; globalOpIntern.set(s, gid); }
+        if (gid === undefined) { gid = gNextOp >= 255 ? 1 : gNextOp++; globalOpIntern.set(s, gid); }
         opMap[id] = gid;
       }
       segOpRemap.push(opMap);
@@ -793,7 +780,7 @@ export class TraceParser {
       for (let id = 0; id < seg.predLookup.length; id++) {
         const s = seg.predLookup[id];
         let gid = globalPredIntern.get(s);
-        if (gid === undefined) { gid = gNextPred++; globalPredIntern.set(s, gid); }
+        if (gid === undefined) { gid = gNextPred >= 255 ? 1 : gNextPred++; globalPredIntern.set(s, gid); }
         predMap[id] = gid;
       }
       segPredRemap.push(predMap);
@@ -803,6 +790,7 @@ export class TraceParser {
     const predLookup = new Array(gNextPred);
     for (const [str, id] of globalPredIntern) predLookup[id] = str;
 
+    mp("Merging PE state\u2026", 0);
     // 3. Merge PE state across segments with cross-segment dedup.
     //
     // The single-threaded parser uses prevExState per PE to dedup EX OP events.
@@ -815,7 +803,9 @@ export class TraceParser {
     const mergedPE = new Map();
     const globalPrevExState = new Map(); // accumulated across all segments
 
-    for (let si = 0; si < segments.length; si++) {
+    const nSeg = segments.length;
+    for (let si = 0; si < nSeg; si++) {
+      mp("Merging PE state\u2026", (si / nSeg) * 25);
       const seg = segments[si];
       const opRemap = segOpRemap[si];
       const predRemap = segPredRemap[si];
@@ -862,9 +852,14 @@ export class TraceParser {
       // dedup maintains its own consistent state.
     }
 
+    mp("Compacting PE state\u2026", 25);
     // Compact merged PE state to typed arrays
     const peStateIndex = new Map();
+    const mergedPESize = mergedPE.size;
+    let peCompactIdx = 0;
     for (const [key, pe] of mergedPE) {
+      if (peCompactIdx % 200 === 0) mp("Compacting PE state\u2026", 25 + (peCompactIdx / mergedPESize) * 10);
+      peCompactIdx++;
       const len = pe.cycles.length;
       peStateIndex.set(key, {
         cycles: new Float64Array(pe.cycles),
@@ -877,12 +872,15 @@ export class TraceParser {
       });
     }
 
+    mp("Merging wavelets\u2026", 35);
     // 4. Merge wavelet hops: concatenate per-ident arrays across segments
     const mergedWav = new Map();
-    for (const seg of segments) {
+    for (let si = 0; si < nSeg; si++) {
+      mp("Merging wavelets\u2026", 35 + (si / nSeg) * 15);
+      const seg = segments[si];
       for (const [ident, entry] of seg.waveletTemp) {
         if (!mergedWav.has(ident)) {
-          mergedWav.set(ident, { ident: entry.ident, color: entry.color, ctrl: entry.ctrl,
+          mergedWav.set(ident, { ident: entry.ident, color: entry.color, ctrl: entry.ctrl, lf: entry.lf,
                                   cycles: [], xs: [], ys: [], landings: [], departings: [], consumed: [] });
         }
         const dst = mergedWav.get(ident);
@@ -897,9 +895,14 @@ export class TraceParser {
       }
     }
 
+    mp("Compacting wavelets\u2026", 50);
     // Compact wavelet hops to typed arrays
     const waveletIndex = new Map();
+    const mergedWavSize = mergedWav.size;
+    let wavCompactIdx = 0;
     for (const [ident, entry] of mergedWav) {
+      if (wavCompactIdx % 500 === 0) mp("Compacting wavelets\u2026", 50 + (wavCompactIdx / mergedWavSize) * 35);
+      wavCompactIdx++;
       const len = entry.cycles.length;
       const cycles = new Float64Array(len);
       const xs = new Uint16Array(len);
@@ -912,13 +915,14 @@ export class TraceParser {
         xs[i] = entry.xs[i];
         ys[i] = entry.ys[i];
         landings[i] = entry.landings[i]; // already encoded
-        departings[i] = encodeDeparting(entry.departings[i]);
+        departings[i] = entry.departings[i]; // already encoded as bitmask
         consumed[i] = entry.consumed[i];
       }
-      waveletIndex.set(ident, { ident: entry.ident, color: entry.color, ctrl: entry.ctrl,
+      waveletIndex.set(ident, { ident: entry.ident, color: entry.color, ctrl: entry.ctrl, lf: entry.lf,
                                  hops: { cycles, xs, ys, landings, departings, consumed, length: len } });
     }
 
+    mp("Merging landings\u2026", 85);
     // 5. Merge and compact landings
     const allLandCycles = [], allLandXs = [], allLandYs = [], allLandColors = [], allLandDirs = [];
     for (const seg of segments) {
@@ -933,9 +937,11 @@ export class TraceParser {
     let landingIndex = null;
     const totalLandings = allLandCycles.length;
     if (totalLandings > 0) {
+      mp("Sorting landings\u2026", 90);
       const order = new Uint32Array(totalLandings);
       for (let i = 0; i < totalLandings; i++) order[i] = i;
       order.sort((a, b) => allLandCycles[a] - allLandCycles[b]);
+      mp("Compacting landings\u2026", 93);
       const lXs = new Uint16Array(totalLandings), lYs = new Uint16Array(totalLandings);
       const lColors = new Uint16Array(totalLandings), lDirs = new Uint8Array(totalLandings);
       const lCyclesFlat = new Float64Array(totalLandings);

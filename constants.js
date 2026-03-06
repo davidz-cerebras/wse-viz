@@ -18,8 +18,11 @@ export const STEP_DELAY = 150; // delay between animation phases in demo algorit
 // Packet appearance
 export const PACKET_RADIUS = 3;
 export const PACKET_HALO_RADIUS = 5; // glow ring around packet dot
-export const PACKET_COLOR = "rgb(255, 193, 7)";
-export const PACKET_HALO_COLOR = "rgba(255, 200, 35, 0.3)";
+export const PACKET_COLOR = "rgb(255, 193, 7)";         // data wavelet: amber/gold
+export const PACKET_CTRL_COLOR = "rgb(255, 130, 180)";  // control wavelet: pink
+export const PACKET_HALO_COLOR = "rgba(255, 200, 35, 0.3)";       // data wavelet halo
+export const PACKET_CTRL_HALO_COLOR = "rgba(255, 150, 190, 0.3)"; // control wavelet halo: pinkish
+export const PACKET_LF_HALO_COLOR = "rgba(100, 181, 246, 0.5)";   // last-in-flight halo: blue
 
 // PE timing
 export const PE_ON_DURATION = 200;

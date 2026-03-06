@@ -31,6 +31,7 @@ let gridNaturalHeight = 0;
 // Shift+drag zoom selection state
 let zoomDrag = null; // { startX, startY, canvasOffX, canvasOffY } or null
 let suppressNextClick = false;
+let viewportStack = []; // stack of previous viewports for undo
 
 function init() {
   canvas = document.getElementById("wseCanvas");
@@ -50,8 +51,13 @@ function init() {
     operationValue: document.getElementById("operationValue"),
     opChart: document.getElementById("opChart"),
     panelResizer: document.getElementById("panelResizer"),
+    undoZoomBtn: document.getElementById("undoZoomBtn"),
     resetZoomBtn: document.getElementById("resetZoomBtn"),
     zoomOverlay: document.getElementById("zoomOverlay"),
+    loadingBar: document.getElementById("loadingBar"),
+    loadingFill: document.getElementById("loadingFill"),
+    loadingPct: document.getElementById("loadingPct"),
+    playbackControls: document.getElementById("playbackControls"),
   };
 
   setGrid(GRID_ROWS, GRID_COLS);
@@ -119,7 +125,10 @@ function setupEventListeners() {
     handleTraceFile(e, setGrid);
   });
   canvas.addEventListener("click", handleCanvasClick);
-  canvas.addEventListener("pointerdown", handleZoomDragStart);
+  // Attach zoom drag to the container (not just the canvas) so the user
+  // can start a shift+drag from the blank space around the grid.
+  canvas.parentElement.addEventListener("pointerdown", handleZoomDragStart);
+  els.undoZoomBtn.addEventListener("click", undoZoom);
   els.resetZoomBtn.addEventListener("click", resetZoom);
   setupScrubListeners();
   els.playPauseBtn.addEventListener("click", togglePlayback);
@@ -130,7 +139,9 @@ function setupEventListeners() {
     if (e.code === "Space") {
       e.preventDefault();
       if (!getIsScrubbing()) togglePlayback();
-    } else if (e.key === "Escape" || e.key === "q") {
+    } else if (e.key === "q") {
+      if (grid && grid.viewport) undoZoom();
+    } else if (e.key === "Escape") {
       if (grid && grid.viewport) resetZoom();
     } else if (e.key === "ArrowRight") {
       e.preventDefault();
@@ -250,11 +261,13 @@ function handleZoomDragStart(e) {
     animationLoop.start();
   };
 
+  const container = canvas.parentElement;
+
   const onUp = (ev) => {
-    canvas.removeEventListener("pointermove", onMove);
-    canvas.removeEventListener("pointerup", onUp);
-    canvas.removeEventListener("pointercancel", onUp);
-    try { canvas.releasePointerCapture(ev.pointerId); } catch (_) {}
+    container.removeEventListener("pointermove", onMove);
+    container.removeEventListener("pointerup", onUp);
+    container.removeEventListener("pointercancel", onUp);
+    try { container.releasePointerCapture(ev.pointerId); } catch (_) {}
     overlay.classList.add("hidden");
     grid.zoomPreview = null;
     suppressNextClick = true;
@@ -278,22 +291,43 @@ function handleZoomDragStart(e) {
       return;
     }
 
+    // Push current viewport (or null for full grid) onto the stack before zooming
+    viewportStack.push(grid.viewport ? { ...grid.viewport } : null);
     grid.setViewport(minRow, maxRow, minCol, maxCol);
-    els.resetZoomBtn.classList.remove("hidden");
+    updateZoomButtons();
     applyViewport();
   };
 
-  canvas.setPointerCapture(e.pointerId);
-  canvas.addEventListener("pointermove", onMove);
-  canvas.addEventListener("pointerup", onUp);
-  canvas.addEventListener("pointercancel", onUp);
+  container.setPointerCapture(e.pointerId);
+  container.addEventListener("pointermove", onMove);
+  container.addEventListener("pointerup", onUp);
+  container.addEventListener("pointercancel", onUp);
+}
+
+function undoZoom() {
+  if (!grid || viewportStack.length === 0) return;
+  const prev = viewportStack.pop();
+  if (prev) {
+    grid.setViewport(prev.minRow, prev.maxRow, prev.minCol, prev.maxCol);
+  } else {
+    grid.clearViewport();
+  }
+  updateZoomButtons();
+  applyViewport();
 }
 
 function resetZoom() {
   if (!grid) return;
   grid.clearViewport();
-  els.resetZoomBtn.classList.add("hidden");
+  viewportStack.length = 0;
+  updateZoomButtons();
   applyViewport();
+}
+
+function updateZoomButtons() {
+  const zoomed = grid && grid.viewport;
+  els.resetZoomBtn.classList.toggle("hidden", !zoomed);
+  els.undoZoomBtn.classList.toggle("hidden", !zoomed);
 }
 
 function applyViewport() {
@@ -395,8 +429,10 @@ function setGrid(rows, cols) {
   setReplayGrid(grid);
   // Reset viewport/zoom state
   zoomDrag = null;
+  viewportStack.length = 0;
   viewportOffsetX = 0;
   viewportOffsetY = 0;
+  els.undoZoomBtn.classList.add("hidden");
   els.resetZoomBtn.classList.add("hidden");
   gridNaturalWidth = cols * (CELL_SIZE + GAP) + GAP;
   gridNaturalHeight = rows * (CELL_SIZE + GAP) + GAP;

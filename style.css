@@ -109,6 +109,7 @@ header h1 {
   font-size: 0.85rem;
   color: var(--color-accent);
   min-width: 120px;
+  white-space: pre;
 }
 
 #cgBtn {
@@ -176,12 +177,53 @@ canvas {
 }
 
 .playback-bar {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
   padding: 0.6rem 2rem;
   background: linear-gradient(135deg, var(--color-bg-panel) 0%, var(--color-bg-surface) 100%);
   border-top: 2px solid var(--color-border);
+}
+
+.playback-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.loading-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.loading-label {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.loading-track {
+  flex: 1;
+  height: 6px;
+  background: var(--color-border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.loading-fill {
+  height: 100%;
+  width: 0%;
+  background: #ff9800;
+  border-radius: 3px;
+  transition: width 0.15s ease;
+}
+
+.loading-pct {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: #ff9800;
+  width: 4.5em;
+  text-align: right;
+  flex-shrink: 0;
 }
 
 .icon-btn {

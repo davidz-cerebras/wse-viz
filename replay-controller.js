@@ -12,6 +12,7 @@ const replay = {
 let isScrubbing = false;
 let scrubWasPlaying = false;
 let handleTraceGeneration = 0;
+let activeWorker = null; // current trace-loading worker, terminated on cancel/re-load
 
 // PE selection state
 let selectedPE = null; // { row, col, traceX, traceY, minCycle, cycleStates }
@@ -147,7 +148,7 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
       for (const waypoints of branches) {
         const branchEnd = waypoints[waypoints.length - 1].cycle;
         if (branchEnd < targetCycle) continue;
-        const pkt = new TracedPacket(waypoints, td.dimY, wv.color);
+        const pkt = new TracedPacket(waypoints, td.dimY, wv.color, wv.ctrl, wv.lf);
         pkt.setCycle(targetCycle);
         pkt.setFractionalCycle(targetCycle);
         grid.packets.push(pkt);
@@ -168,6 +169,9 @@ export function selectPE(row, col, traceX, traceY) {
     deselectPE();
     return;
   }
+
+  // Clean up previous PE selection before switching to the new one
+  if (selectedPE) deselectPE();
 
   const key = `${traceX},${traceY}`;
   const td = replay.traceData;
@@ -445,8 +449,9 @@ function updatePETraceHighlight() {
 function updateScrubUI() {
   if (!replay.state) return;
   els.scrubBar.value = replay.state.currentCycle;
-  els.cycleDisplay.textContent =
-    `Cycle ${replay.state.currentCycle} / ${replay.state.maxCycle}`;
+  const maxStr = String(replay.state.maxCycle);
+  const curStr = String(replay.state.currentCycle).padStart(maxStr.length);
+  els.cycleDisplay.textContent = `Cycle ${curStr} / ${maxStr}`;
 }
 
 export function updateReplayTick(timestamp) {
@@ -526,7 +531,7 @@ export function togglePlayback() {
     els.playPauseBtn.textContent = "\u25B6";
   } else {
     if (replay.state.currentCycle >= replay.state.maxCycle) {
-      seekToCycle(replay.state.minCycle - 1);
+      seekToCycle(replay.state.minCycle);
     }
     resumePlayback();
   }
@@ -538,7 +543,7 @@ export function adjustSpeed(factor) {
   if (newSpeed < 1) return;
   replay.state.speed = newSpeed;
   replay.state.lastTickTime = performance.now();
-  els.speedDisplay.textContent = `${newSpeed} cyc/s`;
+  els.speedDisplay.textContent = `${newSpeed} Hz`;
 }
 
 // Step one cycle forward or backward with smooth animation.
@@ -560,7 +565,7 @@ export function stepCycle(direction) {
   }
 
   const targetCycle = replay.state.currentCycle + direction;
-  if (targetCycle < replay.state.minCycle - 1 || targetCycle > replay.state.maxCycle) return;
+  if (targetCycle < replay.state.minCycle || targetCycle > replay.state.maxCycle) return;
 
   seekToCycle(targetCycle);
 
@@ -615,6 +620,7 @@ export function seekToCycle(targetCycle) {
 
 export function cancelReplay() {
   handleTraceGeneration++;
+  if (activeWorker) { activeWorker.terminate(); activeWorker = null; }
   deselectPE();
   replay.state = null;
   replay.traceData = null;
@@ -633,37 +639,72 @@ export function handleTraceFile(event, setGrid) {
   const myGen = ++handleTraceGeneration;
 
   // Null out stale replay/trace state so playback controls are inert during
-  // indexing, and so a thrown exception doesn't leave stale traceData behind.
+  // loading, and so a thrown exception doesn't leave stale traceData behind.
   replay.state = null;
   replay.traceData = null;
 
-  // Show only the playback bar for progress text — don't call showPanel("trace")
-  // yet, since that triggers resizeCanvas on the old grid.
+  // Show the playback bar with loading progress — hide playback controls
+  // since they're inert during loading (replay.state is null).
   els.playbackBar.classList.remove("hidden");
-  els.cycleDisplay.textContent = "Indexing\u2026";
+  els.playbackControls.classList.add("hidden");
+  els.loadingBar.classList.remove("hidden");
+  els.loadingBar.querySelector(".loading-label").textContent = "Loading\u2026";
+  els.loadingFill.style.width = "0%";
+  els.loadingPct.textContent = "0.0%";
 
+  if (activeWorker) activeWorker.terminate();
   const worker = new Worker("trace-worker.js", { type: "module" });
+  activeWorker = worker;
+
+  worker.onerror = (err) => {
+    worker.terminate(); activeWorker = null;
+    if (myGen !== handleTraceGeneration) return;
+    els.loadingBar.classList.add("hidden");
+    els.playbackControls.classList.remove("hidden");
+    els.cycleDisplay.textContent = `Error: ${err.message || "worker failed to load"}`;
+  };
 
   worker.onmessage = (e) => {
     const msg = e.data;
 
     if (msg.type === "progress") {
       if (myGen !== handleTraceGeneration) return;
-      els.cycleDisplay.textContent = `Indexing\u2026 ${msg.pct}%`;
+      els.loadingFill.style.width = `${msg.pct}%`;
+      els.loadingPct.textContent = `${msg.pct.toFixed(1)}%`;
+      return;
+    }
+
+    if (msg.type === "merging") {
+      if (myGen !== handleTraceGeneration) return;
+      els.loadingBar.querySelector(".loading-label").textContent = msg.step;
+      els.loadingFill.style.width = `${msg.pct}%`;
+      els.loadingPct.textContent = `${msg.pct.toFixed(1)}%`;
+      return;
+    }
+
+    if (msg.type === "transferring") {
+      if (myGen !== handleTraceGeneration) return;
+      els.loadingBar.querySelector(".loading-label").textContent = "Transferring\u2026";
+      els.loadingFill.style.width = "100%";
+      els.loadingPct.textContent = "";
       return;
     }
 
     if (msg.type === "error") {
-      worker.terminate();
+      worker.terminate(); activeWorker = null;
       if (myGen !== handleTraceGeneration) return;
+      els.loadingBar.classList.add("hidden");
       els.cycleDisplay.textContent = `Error: ${msg.message}`;
       els.playbackBar.classList.add("hidden");
       return;
     }
 
     if (msg.type === "done") {
-      worker.terminate();
+      worker.terminate(); activeWorker = null;
       if (myGen !== handleTraceGeneration) return;
+
+      els.loadingBar.querySelector(".loading-label").textContent = "Building grid\u2026";
+      els.loadingPct.textContent = "";
 
       // Reconstruct Maps from the transferred entry arrays
       const d = msg.data;
@@ -680,6 +721,10 @@ export function handleTraceFile(event, setGrid) {
         maxCycle: d.maxCycle,
         totalEvents: d.totalEvents,
       };
+
+      // Swap from loading bar back to playback controls
+      els.loadingBar.classList.add("hidden");
+      els.playbackControls.classList.remove("hidden");
 
       if (traceData.dimX === 0 || traceData.dimY === 0 || traceData.minCycle > traceData.maxCycle) {
         els.cycleDisplay.textContent = "Error: invalid trace file";
@@ -699,10 +744,10 @@ export function handleTraceFile(event, setGrid) {
 
       const { minCycle, maxCycle } = traceData;
       const speed = 4;
-      els.speedDisplay.textContent = `${speed} cyc/s`;
+      els.speedDisplay.textContent = `${speed} Hz`;
 
       replay.state = {
-        currentCycle: minCycle - 1,
+        currentCycle: minCycle,
         speed,
         playing: false,
         lastTickTime: performance.now(),
@@ -710,9 +755,9 @@ export function handleTraceFile(event, setGrid) {
         maxCycle,
       };
 
-      els.scrubBar.min = minCycle - 1;
+      els.scrubBar.min = minCycle;
       els.scrubBar.max = maxCycle;
-      els.scrubBar.value = minCycle - 1;
+      els.scrubBar.value = minCycle;
       els.playPauseBtn.textContent = "\u25B6";
       updateScrubUI();
     }
