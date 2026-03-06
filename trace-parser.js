@@ -3,7 +3,7 @@ const landingRegex =
 const exOpRegex = /^@(\d+) P(\d+)\.(\d+):.*\[EX OP\]/;
 const opcodeRegex = /T\d+(?:\.\w+)?\s+(!?(?:CF|p)\d+(?::\d+)?\?)?\s*(\S+)/;
 const waveletStallRegex =
-  /^@(\d+) P(\d+)\.(\d+):.*Not enough wavelets \((\d+)\/(\d+)\) (SRC\d) with C(\d+), IN_Q\[(\d+)\], SIMD-(\d+)/;
+  /^@(\d+) P(\d+)\.(\d+):.*Not enough wavelets \((\d+)\/(\d+)\) (?:for )?(SRC\d) with C(\d+), IN_Q\[(\d+)\], SIMD-(\d+)/;
 const pipeStallRegex =
   /^@(\d+) P(\d+)\.(\d+):.*Pipe: (\d+), Msg: stall: (.+)/;
 const waveletRegex =
@@ -47,8 +47,15 @@ function encodeDeparting(dirs) {
   return mask;
 }
 
+// IO tiles (e.g., "LW36 (iotile)") use a different identifier format than
+// compute tiles ("P<x>.<y> (hwtile)"). We intentionally ignore IO tile events
+// in the current implementation — they handle host I/O and are not part of the
+// PE grid visualization. We may revisit this in the future.
+const iotileTest = /\(iotile\)/;
+
 function parseLanding(line) {
   if (!line.includes(") landing C")) return null;
+  if (iotileTest.test(line)) return null;
   const m = line.match(landingRegex);
   if (!m) {
     console.warn("Trace parse failure: landing line did not match regex:", line.substring(0, 120));
@@ -95,6 +102,7 @@ function parseExOp(line) {
 
 function parseWavelet(line) {
   if (!line.includes(") wavelet C")) return null;
+  if (iotileTest.test(line)) return null; // ignore IO tile wavelets (see comment above parseLanding)
   const m = line.match(waveletRegex);
   if (!m) {
     console.warn("Trace parse failure: wavelet line did not match regex:", line.substring(0, 120));
@@ -123,8 +131,12 @@ function parseWavelet(line) {
     departing,
     colorswap: csMatch ? parseInt(csMatch[1]) : null,
     lf: line.includes(", lf=1"),
-    noCe: line.includes("no_ce"),
-    toCe: line.includes("to_ce_from_q"),
+    // A hop is "consumed" if the wavelet is delivered to the compute element.
+    // This is used to visualize multicast-and-consume: when a wavelet is both
+    // forwarded (departing.length > 0) and consumed, we fork the animation
+    // so one dot continues onward and another terminates at the PE center.
+    consumed: line.includes("to_ce_from_q") || line.includes("to_ce_from_router") ||
+      (m[10] !== "-" && departing.length === 0 && !line.includes("no_ce")),
   };
 }
 
@@ -310,7 +322,7 @@ export class TraceParser {
           const om = after.match(opcodeRegex);
           const pred = om ? (om[1] || null) : null;
           const op = om ? om[2] : null;
-          const state = `1:${pred || ""}:${op}`;
+          const state = `1:${pred || ""}:${op || ""}`;
           if (prevExState.get(key) !== state) {
             prevExState.set(key, state);
             const pe = getPEEntry(key);
@@ -343,7 +355,7 @@ export class TraceParser {
         let entry = waveletTemp.get(wv.ident);
         if (!entry) {
           entry = { ident: wv.ident, color: wv.color, ctrl: wv.ctrl,
-                    cycles: [], xs: [], ys: [], landings: [], departings: [] };
+                    cycles: [], xs: [], ys: [], landings: [], departings: [], consumed: [] };
           waveletTemp.set(wv.ident, entry);
         }
         entry.cycles.push(wv.cycle);
@@ -351,6 +363,7 @@ export class TraceParser {
         entry.ys.push(wv.y);
         entry.landings.push(wv.landingEncoded);
         entry.departings.push(wv.departing);
+        entry.consumed.push(wv.consumed ? 1 : 0);
         return;
       }
 
@@ -460,18 +473,20 @@ export class TraceParser {
       const ys = new Uint16Array(len);
       const landings = new Uint8Array(len);
       const departings = new Uint8Array(len);
+      const consumed = new Uint8Array(len);
       for (let i = 0; i < len; i++) {
         cycles[i] = entry.cycles[i];
         xs[i] = entry.xs[i];
         ys[i] = entry.ys[i];
         landings[i] = entry.landings[i];
         departings[i] = encodeDeparting(entry.departings[i]);
+        consumed[i] = entry.consumed[i];
       }
       waveletIndex.set(ident, {
         ident: entry.ident,
         color: entry.color,
         ctrl: entry.ctrl,
-        hops: { cycles, xs, ys, landings, departings, length: len },
+        hops: { cycles, xs, ys, landings, departings, consumed, length: len },
       });
     }
 
@@ -540,6 +555,408 @@ export class TraceParser {
       maxCycle,
       totalEvents,
     };
+  }
+
+  // Parse a byte range of the file, returning uncompacted partial results.
+  // Used by parallel segment workers. Each segment runs independently with
+  // its own dedup state; the coordinator merges results afterward.
+  static async indexSegment(file, startByte, endByte, isFirst, onProgress) {
+    let dimX = 0, dimY = 0;
+    let minCycle = Infinity, maxCycle = -Infinity;
+    let totalEvents = 0;
+
+    const dimRegex = /^@\d+ dimX=(\d+), dimY=(\d+)/;
+    const prevExState = new Map();
+    const peStateTemp = new Map();
+    const waveletTemp = new Map();
+    const tmpLandCycles = [], tmpLandXs = [], tmpLandYs = [], tmpLandColors = [], tmpLandDirs = [];
+    let hasWaveletData = false;
+
+    const opIntern = new Map(); opIntern.set(null, 0);
+    const predIntern = new Map(); predIntern.set(null, 0);
+    let nextOpId = 1, nextPredId = 1;
+
+    function getPEEntry(key) {
+      let e = peStateTemp.get(key);
+      if (!e) { e = { cycles: [], busy: [], opIds: [], predIds: [], stall: [], stallReasons: [] }; peStateTemp.set(key, e); }
+      return e;
+    }
+    function internOp(op) {
+      let id = opIntern.get(op);
+      if (id === undefined) { id = nextOpId++; opIntern.set(flatStr(op), id); }
+      return id;
+    }
+    function internPred(pred) {
+      let id = predIntern.get(pred);
+      if (id === undefined) { id = nextPredId++; predIntern.set(flatStr(pred), id); }
+      return id;
+    }
+    const addStall = (key, cycle, reason, type) => {
+      const pe = getPEEntry(key);
+      const len = pe.cycles.length;
+      if (len > 0 && pe.stall[len - 1] && pe.cycles[len - 1] === cycle) {
+        const existing = pe.stallReasons[len - 1];
+        if (!existing.some(r => r.reason === reason)) existing.push({ reason, type });
+        return;
+      }
+      pe.cycles.push(cycle); pe.busy.push(0); pe.opIds.push(0); pe.predIds.push(0);
+      pe.stall.push(1); pe.stallReasons.push([{ reason, type }]);
+    };
+
+    const processLine = (line) => {
+      if (line.charCodeAt(0) === 64) {
+        const spaceIdx = line.indexOf(" ", 1);
+        if (spaceIdx > 1) {
+          const cycle = parseInt(line.substring(1, spaceIdx));
+          if (cycle > maxCycle) maxCycle = cycle;
+          if (cycle < minCycle) minCycle = cycle;
+        }
+      }
+      if (isFirst && dimX === 0) {
+        const dimMatch = line.match(dimRegex);
+        if (dimMatch) { dimX = parseInt(dimMatch[1]); dimY = parseInt(dimMatch[2]); return; }
+      }
+
+      const exIdx = line.indexOf("[EX OP]");
+      if (exIdx !== -1) {
+        const sp1 = line.indexOf(" ", 1);
+        const pIdx = sp1 + 2;
+        const dotIdx = line.indexOf(".", pIdx);
+        const colIdx = line.indexOf(":", dotIdx);
+        if (dotIdx < 0 || colIdx < 0) return;
+        const x = +line.substring(pIdx, dotIdx);
+        const y = +line.substring(dotIdx + 1, colIdx);
+        const key = `${x},${y}`;
+        const isIdle = line.charCodeAt(exIdx + 8) === 73;
+        if (isIdle) {
+          if (prevExState.get(key) !== "0") {
+            prevExState.set(key, "0");
+            const pe = getPEEntry(key);
+            pe.cycles.push(+line.substring(1, sp1)); pe.busy.push(0);
+            pe.opIds.push(0); pe.predIds.push(0); pe.stall.push(0); pe.stallReasons.push(null);
+          }
+        } else {
+          const after = line.substring(exIdx + 8);
+          const om = after.match(opcodeRegex);
+          const pred = om ? (om[1] || null) : null;
+          const op = om ? om[2] : null;
+          const state = `1:${pred || ""}:${op || ""}`;
+          if (prevExState.get(key) !== state) {
+            prevExState.set(key, state);
+            const pe = getPEEntry(key);
+            pe.cycles.push(+line.substring(1, sp1)); pe.busy.push(1);
+            pe.opIds.push(internOp(op)); pe.predIds.push(internPred(pred));
+            pe.stall.push(0); pe.stallReasons.push(null);
+          }
+        }
+        return;
+      }
+
+      const landing = parseLanding(line);
+      if (landing) {
+        totalEvents++;
+        tmpLandCycles.push(landing.cycle); tmpLandXs.push(landing.x);
+        tmpLandYs.push(landing.y); tmpLandColors.push(landing.color);
+        tmpLandDirs.push(LANDING_ENCODE[landing.dir] ?? 0);
+        return;
+      }
+
+      const wv = parseWavelet(line);
+      if (wv) {
+        hasWaveletData = true; totalEvents++;
+        let entry = waveletTemp.get(wv.ident);
+        if (!entry) {
+          entry = { ident: wv.ident, color: wv.color, ctrl: wv.ctrl,
+                    cycles: [], xs: [], ys: [], landings: [], departings: [], consumed: [] };
+          waveletTemp.set(wv.ident, entry);
+        }
+        entry.cycles.push(wv.cycle); entry.xs.push(wv.x); entry.ys.push(wv.y);
+        entry.landings.push(wv.landingEncoded); entry.departings.push(wv.departing);
+        entry.consumed.push(wv.consumed ? 1 : 0);
+        return;
+      }
+
+      const stall = parseWaveletStall(line);
+      if (stall) { addStall(`${stall.x},${stall.y}`, stall.cycle, `C${stall.color}`, "wavelet"); return; }
+
+      const pipeStall = parsePipeStall(line);
+      if (pipeStall) { addStall(`${pipeStall.x},${pipeStall.y}`, pipeStall.cycle, pipeStall.label, "pipeline"); }
+    };
+
+    // Chunked reading with byte-level carryover (see index() for explanation)
+    const CHUNK_SIZE = 10 * 1024 * 1024;
+    const decoder = new TextDecoder();
+    const segmentSize = endByte - startByte;
+    let carryover = new Uint8Array(0);
+    let lastPct = -1;
+    let skipFirstLine = !isFirst; // non-first segments skip partial first line
+
+    for (let offset = startByte; offset < endByte; offset += CHUNK_SIZE) {
+      const end = Math.min(offset + CHUNK_SIZE, endByte);
+      const blob = file.slice(offset, end);
+      const raw = new Uint8Array(await blob.arrayBuffer());
+
+      let bytes;
+      if (carryover.length > 0) {
+        bytes = new Uint8Array(carryover.length + raw.length);
+        bytes.set(carryover); bytes.set(raw, carryover.length);
+      } else {
+        bytes = raw;
+      }
+
+      let lastNL = bytes.length - 1;
+      while (lastNL >= 0 && bytes[lastNL] !== 10) lastNL--;
+
+      if (lastNL < 0) { carryover = bytes.slice(0); continue; }
+
+      const text = decoder.decode(bytes.subarray(0, lastNL + 1));
+      carryover = lastNL + 1 < bytes.length ? bytes.slice(lastNL + 1) : new Uint8Array(0);
+
+      const lines = text.split("\n");
+      let startI = 0;
+      if (skipFirstLine) { startI = 1; skipFirstLine = false; } // skip partial first line
+      for (let i = startI; i < lines.length - 1; i++) processLine(lines[i]);
+
+      if (onProgress) {
+        const pct = Math.round(((end - startByte) / segmentSize) * 100);
+        if (pct !== lastPct) { lastPct = pct; onProgress(pct); }
+      }
+    }
+
+    // Handle final carryover — for the last segment, process it;
+    // for non-last segments, read past endByte to finish the straddling line
+    if (carryover.length > 0) {
+      // Read one more small chunk to find the end of the straddling line
+      if (endByte < file.size) {
+        const extra = new Uint8Array(await file.slice(endByte, Math.min(endByte + 10000, file.size)).arrayBuffer());
+        const combined = new Uint8Array(carryover.length + extra.length);
+        combined.set(carryover); combined.set(extra, carryover.length);
+        const nlIdx = combined.indexOf(10);
+        if (nlIdx >= 0) {
+          processLine(decoder.decode(combined.subarray(0, nlIdx)));
+        } else {
+          processLine(decoder.decode(combined));
+        }
+      } else {
+        processLine(decoder.decode(carryover));
+      }
+    }
+
+    // Build op/pred lookup tables for this segment
+    const opLookup = new Array(nextOpId);
+    for (const [str, id] of opIntern) opLookup[id] = str;
+    const predLookup = new Array(nextPredId);
+    for (const [str, id] of predIntern) predLookup[id] = str;
+
+    return {
+      dimX, dimY, minCycle, maxCycle, totalEvents, hasWaveletData,
+      peStateTemp: [...peStateTemp.entries()],
+      prevExState: [...prevExState.entries()],
+      waveletTemp: [...waveletTemp.entries()],
+      tmpLandCycles, tmpLandXs, tmpLandYs, tmpLandColors, tmpLandDirs,
+      opLookup, predLookup,
+    };
+  }
+
+  // Merge partial results from N parallel segments into final compacted trace data.
+  static mergeSegments(segments) {
+    let dimX = 0, dimY = 0, minCycle = Infinity, maxCycle = -Infinity;
+    let totalEvents = 0, hasWaveletData = false;
+
+    // 1. Scalars: take from first segment that has dims; merge cycle range
+    for (const seg of segments) {
+      if (seg.dimX > 0 && dimX === 0) { dimX = seg.dimX; dimY = seg.dimY; }
+      if (seg.minCycle < minCycle) minCycle = seg.minCycle;
+      if (seg.maxCycle > maxCycle) maxCycle = seg.maxCycle;
+      totalEvents += seg.totalEvents;
+      if (seg.hasWaveletData) hasWaveletData = true;
+    }
+
+    // 2. Build global op/pred intern tables from all segments
+    const globalOpIntern = new Map(); globalOpIntern.set(null, 0);
+    const globalPredIntern = new Map(); globalPredIntern.set(null, 0);
+    let gNextOp = 1, gNextPred = 1;
+    // segOpRemap[segIdx][localId] = globalId
+    const segOpRemap = [];
+    const segPredRemap = [];
+    for (const seg of segments) {
+      const opMap = new Array(seg.opLookup.length);
+      for (let id = 0; id < seg.opLookup.length; id++) {
+        const s = seg.opLookup[id];
+        let gid = globalOpIntern.get(s);
+        if (gid === undefined) { gid = gNextOp++; globalOpIntern.set(s, gid); }
+        opMap[id] = gid;
+      }
+      segOpRemap.push(opMap);
+
+      const predMap = new Array(seg.predLookup.length);
+      for (let id = 0; id < seg.predLookup.length; id++) {
+        const s = seg.predLookup[id];
+        let gid = globalPredIntern.get(s);
+        if (gid === undefined) { gid = gNextPred++; globalPredIntern.set(s, gid); }
+        predMap[id] = gid;
+      }
+      segPredRemap.push(predMap);
+    }
+    const opLookup = new Array(gNextOp);
+    for (const [str, id] of globalOpIntern) opLookup[id] = str;
+    const predLookup = new Array(gNextPred);
+    for (const [str, id] of globalPredIntern) predLookup[id] = str;
+
+    // 3. Merge PE state across segments with cross-segment dedup.
+    //
+    // The single-threaded parser uses prevExState per PE to dedup EX OP events.
+    // Stall events don't change prevExState. Each segment starts with a fresh
+    // prevExState, so its first EX OP for each PE is always recorded — even if
+    // it matches the state at the end of the previous segment.
+    //
+    // To fix this, we accumulate prevExState across segments and re-apply
+    // dedup to non-stall events. For stalls, we merge same-cycle stall reasons.
+    const mergedPE = new Map();
+    const globalPrevExState = new Map(); // accumulated across all segments
+
+    for (let si = 0; si < segments.length; si++) {
+      const seg = segments[si];
+      const opRemap = segOpRemap[si];
+      const predRemap = segPredRemap[si];
+
+      for (const [key, pe] of seg.peStateTemp) {
+        if (!mergedPE.has(key)) {
+          mergedPE.set(key, { cycles: [], busy: [], opIds: [], predIds: [], stall: [], stallReasons: [] });
+        }
+        const dst = mergedPE.get(key);
+
+        for (let i = 0; i < pe.cycles.length; i++) {
+          const gOpId = opRemap[pe.opIds[i]];
+          const gPredId = predRemap[pe.predIds[i]];
+
+          if (!pe.stall[i]) {
+            // Non-stall event: dedup against globalPrevExState (same logic as single-threaded)
+            const newState = pe.busy[i] ? `1:${predLookup[gPredId] || ""}:${opLookup[gOpId] || ""}` : "0";
+            if (globalPrevExState.get(key) === newState) continue;
+            globalPrevExState.set(key, newState);
+          } else {
+            // Stall event: merge reasons if same PE + same cycle as last merged event
+            const dstLen = dst.cycles.length;
+            if (dstLen > 0 && dst.stall[dstLen - 1] && dst.cycles[dstLen - 1] === pe.cycles[i]) {
+              const existing = dst.stallReasons[dstLen - 1];
+              for (const r of pe.stallReasons[i]) {
+                if (!existing.some(e => e.reason === r.reason)) existing.push(r);
+              }
+              continue;
+            }
+          }
+
+          dst.cycles.push(pe.cycles[i]);
+          dst.busy.push(pe.busy[i]);
+          dst.opIds.push(gOpId);
+          dst.predIds.push(gPredId);
+          dst.stall.push(pe.stall[i]);
+          dst.stallReasons.push(pe.stallReasons[i]);
+        }
+      }
+
+      // Note: globalPrevExState is already correct from the event processing
+      // loop above (line 821 updates it for every non-stall event that passes
+      // dedup). We do NOT overwrite from seg.prevExState because the merge
+      // dedup maintains its own consistent state.
+    }
+
+    // Compact merged PE state to typed arrays
+    const peStateIndex = new Map();
+    for (const [key, pe] of mergedPE) {
+      const len = pe.cycles.length;
+      peStateIndex.set(key, {
+        cycles: new Float64Array(pe.cycles),
+        busy: new Uint8Array(pe.busy),
+        opIds: new Uint8Array(pe.opIds),
+        predIds: new Uint8Array(pe.predIds),
+        stall: new Uint8Array(pe.stall),
+        stallReasons: pe.stallReasons,
+        length: len,
+      });
+    }
+
+    // 4. Merge wavelet hops: concatenate per-ident arrays across segments
+    const mergedWav = new Map();
+    for (const seg of segments) {
+      for (const [ident, entry] of seg.waveletTemp) {
+        if (!mergedWav.has(ident)) {
+          mergedWav.set(ident, { ident: entry.ident, color: entry.color, ctrl: entry.ctrl,
+                                  cycles: [], xs: [], ys: [], landings: [], departings: [], consumed: [] });
+        }
+        const dst = mergedWav.get(ident);
+        for (let i = 0; i < entry.cycles.length; i++) {
+          dst.cycles.push(entry.cycles[i]);
+          dst.xs.push(entry.xs[i]);
+          dst.ys.push(entry.ys[i]);
+          dst.landings.push(entry.landings[i]);
+          dst.departings.push(entry.departings[i]);
+          dst.consumed.push(entry.consumed[i]);
+        }
+      }
+    }
+
+    // Compact wavelet hops to typed arrays
+    const waveletIndex = new Map();
+    for (const [ident, entry] of mergedWav) {
+      const len = entry.cycles.length;
+      const cycles = new Float64Array(len);
+      const xs = new Uint16Array(len);
+      const ys = new Uint16Array(len);
+      const landings = new Uint8Array(len);
+      const departings = new Uint8Array(len);
+      const consumed = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        cycles[i] = entry.cycles[i];
+        xs[i] = entry.xs[i];
+        ys[i] = entry.ys[i];
+        landings[i] = entry.landings[i]; // already encoded
+        departings[i] = encodeDeparting(entry.departings[i]);
+        consumed[i] = entry.consumed[i];
+      }
+      waveletIndex.set(ident, { ident: entry.ident, color: entry.color, ctrl: entry.ctrl,
+                                 hops: { cycles, xs, ys, landings, departings, consumed, length: len } });
+    }
+
+    // 5. Merge and compact landings
+    const allLandCycles = [], allLandXs = [], allLandYs = [], allLandColors = [], allLandDirs = [];
+    for (const seg of segments) {
+      for (let i = 0; i < seg.tmpLandCycles.length; i++) {
+        allLandCycles.push(seg.tmpLandCycles[i]);
+        allLandXs.push(seg.tmpLandXs[i]);
+        allLandYs.push(seg.tmpLandYs[i]);
+        allLandColors.push(seg.tmpLandColors[i]);
+        allLandDirs.push(seg.tmpLandDirs[i]);
+      }
+    }
+    let landingIndex = null;
+    const totalLandings = allLandCycles.length;
+    if (totalLandings > 0) {
+      const order = new Uint32Array(totalLandings);
+      for (let i = 0; i < totalLandings; i++) order[i] = i;
+      order.sort((a, b) => allLandCycles[a] - allLandCycles[b]);
+      const lXs = new Uint16Array(totalLandings), lYs = new Uint16Array(totalLandings);
+      const lColors = new Uint16Array(totalLandings), lDirs = new Uint8Array(totalLandings);
+      const lCyclesFlat = new Float64Array(totalLandings);
+      for (let i = 0; i < totalLandings; i++) {
+        const j = order[i];
+        lCyclesFlat[i] = allLandCycles[j]; lXs[i] = allLandXs[j];
+        lYs[i] = allLandYs[j]; lColors[i] = allLandColors[j]; lDirs[i] = allLandDirs[j];
+      }
+      const uniqueCycles = [], offsets = [0];
+      let prevCycle = lCyclesFlat[0]; uniqueCycles.push(prevCycle);
+      for (let i = 1; i < totalLandings; i++) {
+        if (lCyclesFlat[i] !== prevCycle) { prevCycle = lCyclesFlat[i]; uniqueCycles.push(prevCycle); offsets.push(i); }
+      }
+      offsets.push(totalLandings);
+      landingIndex = { cycles: new Float64Array(uniqueCycles), offsets: new Uint32Array(offsets),
+                       xs: lXs, ys: lYs, colors: lColors, dirs: lDirs,
+                       length: uniqueCycles.length, totalLandings };
+    }
+
+    return { dimX, dimY, landingIndex, peStateIndex, opLookup, predLookup,
+             waveletIndex, hasWaveletData, minCycle, maxCycle, totalEvents };
   }
 
   static findCycleIndexLE(cycleIndex, cycle) {

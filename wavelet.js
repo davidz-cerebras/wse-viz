@@ -25,6 +25,7 @@ export function extractBranches(wavelet) {
       y: hops.ys[i],
       landing: LANDING_DECODE[hops.landings[i]],
       departing: decodeDeparting(hops.departings[i]),
+      consumed: !!hops.consumed[i],
     };
     const key = `${hop.cycle},${hop.x},${hop.y}`;
     if (!hopsByPos.has(key)) hopsByPos.set(key, []);
@@ -47,6 +48,18 @@ export function extractBranches(wavelet) {
       }
     }
     return null;
+  }
+
+  function isConsumedWithDepartures(cycle, x, y) {
+    // Check the hop at the arrival cycle and a few cycles after (the wavelet
+    // may have separate hop records for arrival and departure at the same PE)
+    for (let dc = 0; dc <= 3; dc++) {
+      const hereHops = hopsByPos.get(`${cycle + dc},${x},${y}`) || [];
+      for (const h of hereHops) {
+        if (h.consumed && h.departing.length > 0) return true;
+      }
+    }
+    return false;
   }
 
   function getLandingDir(cycle, x, y) {
@@ -108,6 +121,24 @@ export function extractBranches(wavelet) {
           };
           continueTrace([forkStart, forkDest], fromX + d[0], fromY + d[1], dep.depCycle + 1);
         }
+      }
+
+      // Multicast-and-consume: if the wavelet is both forwarded and consumed
+      // at this PE, create a short branch that terminates here (the CE delivery).
+      // The dot visually forks: one continues to the next PE, one stays here.
+      // Check the arrival cycle at this PE (consumePeWp.cycle), not the departure cycle
+      const arrivalCycle = waypoints[waypoints.length - 2].cycle;
+      if (followed && isConsumedWithDepartures(arrivalCycle, fromX, fromY)) {
+        const consumePeWp = waypoints[waypoints.length - 2];
+        branches.push([
+          // Start at the on-ramp (same arrival as the parent branch)
+          { cycle: consumePeWp.cycle, x: fromX, y: fromY,
+            arriveDir: consumePeWp.arriveDir, departDir: null, depCycle: null },
+          // Terminal waypoint: the dot lingers at the on-ramp for one cycle,
+          // visually indicating consumption while the forwarded dot moves on.
+          { cycle: dep.depCycle + 1, x: fromX, y: fromY,
+            arriveDir: consumePeWp.arriveDir, departDir: null, depCycle: null },
+        ]);
       }
 
       if (!followed) break;
