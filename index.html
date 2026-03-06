@@ -25,6 +25,7 @@
       <main>
         <div class="canvas-container">
           <canvas id="wseCanvas"></canvas>
+          <div id="zoomOverlay" class="zoom-overlay hidden"></div>
         </div>
         <div class="code-panel hidden" id="cgPanel">
           <h2>Conjugate Gradient Algorithm</h2>
@@ -102,6 +103,7 @@
         <button id="speedDown" class="icon-btn speed-btn" title="Halve speed">&minus;</button>
         <span id="speedDisplay" class="speed-display">4 cyc/s</span>
         <button id="speedUp" class="icon-btn speed-btn" title="Double speed">+</button>
+        <button id="resetZoomBtn" class="btn reset-zoom-btn hidden">Reset Zoom</button>
       </div>
     </div>
     <script type="module" src="app.js"></script>

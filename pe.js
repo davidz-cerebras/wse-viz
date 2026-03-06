@@ -103,6 +103,7 @@ const SYMBOLIC_OPS = {
   LD16:   { symbol: "LD", sub: "16" },
   LD16RP: { symbol: "LD", sub: "32" },
   LD32:   { symbol: "LD", sub: "32" },
+  LD16RQ: { symbol: "LD", sub: "64" },
   LDR16P: { symbol: "LD", sub: "32" },
   LDDDS:  { symbol: "DSR", sub: "LD D" },
   LDDWDS: { symbol: "DSR", sub: "LD D" },
@@ -147,6 +148,15 @@ export class PE {
     this.active = false;
     this.op = null;
     this.selected = false;
+    // Execution/stall model:
+    // The Schrodinger pipeline has 11 stages. A stall at one stage (e.g.,
+    // issue waiting for a DSR) does NOT prevent a different instruction from
+    // executing at the EX stage simultaneously. So a PE can have both `op`
+    // (from the EX stage) and `stall` (from an earlier stage) set at the
+    // same cycle. When both are set, the executing op takes visual priority:
+    // draw() renders the op symbol in blue. Stall coloring and stall reason
+    // labels only appear when the PE is stalled with nothing executing
+    // (`!this.op`), which is the more performance-critical case to highlight.
     this.stall = null; // null, "wavelet", or "pipeline"
     this.stallReason = null; // compact label: "C6", "A0", "R3", "MEM", "S1DS0"
   }
@@ -198,14 +208,14 @@ export class PE {
     const b = this.brightness;
     const baseAlpha = 0.3 + b * 0.7;
 
+    // Stall colors only render when nothing is executing (!this.op).
+    // See the execution/stall model comment in the constructor.
     if (this.stall === "wavelet" && !this.op) {
-      // Wavelet stall: purple tint
       ctx.fillStyle = `rgba(${55 + b * 75}, ${20 + b * 20}, ${70 + b * 110}, ${baseAlpha})`;
     } else if (this.stall && !this.op) {
-      // Pipeline stall: muted reddish-brown tint
       ctx.fillStyle = `rgba(${70 + b * 100}, ${30 + b * 30}, ${20 + b * 20}, ${baseAlpha})`;
     } else {
-      // Normal (executing or idle): blue tint
+      // Normal: executing (bright blue) or idle (dark blue)
       ctx.fillStyle = `rgba(${45 + b * 55}, ${58 + b * 123}, ${90 + b * 156}, ${baseAlpha})`;
     }
     ctx.fillRect(this.x, this.y, this.size, this.size);

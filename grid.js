@@ -12,6 +12,8 @@ export class Grid {
     this.packets = [];
     this.cancelled = false;
     this.pendingTimers = new Set();
+    this.viewport = null; // { minRow, maxRow, minCol, maxCol } or null for full grid
+    this.zoomPreview = null; // { minRow, maxRow, minCol, maxCol } — highlight during drag
     this.centerCol1 = Math.floor((cols - 1) / 2);
     this.centerCol2 = cols % 2 === 0 ? this.centerCol1 + 1 : this.centerCol1;
     this.centerRow1 = Math.floor((rows - 1) / 2);
@@ -23,6 +25,39 @@ export class Grid {
         this.pes.push(new PE(x, y, cellSize));
       }
     }
+  }
+
+  setViewport(minRow, maxRow, minCol, maxCol) {
+    this.viewport = {
+      minRow: Math.max(0, minRow),
+      maxRow: Math.min(this.rows - 1, maxRow),
+      minCol: Math.max(0, minCol),
+      maxCol: Math.min(this.cols - 1, maxCol),
+    };
+  }
+
+  clearViewport() {
+    this.viewport = null;
+  }
+
+  // Returns the natural (logical) pixel size of the current viewport region.
+  getViewportNaturalSize() {
+    const step = this.cellSize + this.gap;
+    if (!this.viewport) {
+      return { width: this.cols * step + this.gap, height: this.rows * step + this.gap };
+    }
+    const v = this.viewport;
+    return {
+      width: (v.maxCol - v.minCol + 1) * step + this.gap,
+      height: (v.maxRow - v.minRow + 1) * step + this.gap,
+    };
+  }
+
+  // Returns the logical pixel offset of the viewport origin.
+  getViewportOffset() {
+    if (!this.viewport) return { x: 0, y: 0 };
+    const step = this.cellSize + this.gap;
+    return { x: this.viewport.minCol * step, y: this.viewport.minRow * step };
   }
 
   cancel() {
@@ -119,12 +154,32 @@ export class Grid {
   }
 
   draw(ctx, now) {
-    for (const pe of this.pes) pe.draw(ctx);
-    this.drawRamps(ctx);
+    const v = this.viewport;
+    const minR = v ? v.minRow : 0, maxR = v ? v.maxRow : this.rows - 1;
+    const minC = v ? v.minCol : 0, maxC = v ? v.maxCol : this.cols - 1;
+    for (let row = minR; row <= maxR; row++) {
+      for (let col = minC; col <= maxC; col++) {
+        this.pes[row * this.cols + col].draw(ctx);
+      }
+    }
+    this.drawRamps(ctx, minR, maxR, minC, maxC);
+    // Packets: let canvas clipping handle off-viewport ones (few packets, negligible cost)
     for (const packet of this.packets) packet.draw(ctx, now, this);
+
+    // Draw zoom preview: tint each selected PE during Shift+drag
+    if (this.zoomPreview) {
+      const zp = this.zoomPreview;
+      ctx.fillStyle = "rgba(255, 152, 0, 0.3)";
+      for (let row = zp.minRow; row <= zp.maxRow; row++) {
+        for (let col = zp.minCol; col <= zp.maxCol; col++) {
+          const pe = this.getPE(row, col);
+          if (pe) ctx.fillRect(pe.x, pe.y, this.cellSize, this.cellSize);
+        }
+      }
+    }
   }
 
-  drawRamps(ctx) {
+  drawRamps(ctx, minR, maxR, minC, maxC) {
     const depth = RAMP_ARROW_DEPTH;
     const lat = RAMP_LATERAL;
     const arrowSize = RAMP_ARROW_SIZE;
@@ -132,8 +187,8 @@ export class Grid {
     // Collect active ramps from TracedPackets
     const activeRamps = this._collectActiveRamps();
 
-    for (let row = 0; row < this.rows; row++) {
-      for (let col = 0; col < this.cols; col++) {
+    for (let row = minR; row <= maxR; row++) {
+      for (let col = minC; col <= maxC; col++) {
         const pe = this.getPE(row, col);
         if (!pe) continue;
         const cx = pe.x + CELL_SIZE / 2;
@@ -245,6 +300,7 @@ export class Grid {
   }
 
   hasActivity() {
+    if (this.zoomPreview) return true;
     if (this.packets.length > 0) return true;
     for (const pe of this.pes) {
       if (pe.active || pe.transitionDuration > 0) return true;

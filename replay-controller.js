@@ -1,4 +1,4 @@
-import { TraceParser } from "./trace-parser.js";
+import { TraceParser, LANDING_DECODE } from "./trace-parser.js";
 import { extractBranches, TracedPacket } from "./wavelet.js";
 import { MAX_LOG_ENTRIES, PE_TRACE_WINDOW } from "./constants.js";
 
@@ -39,17 +39,20 @@ export function getIsScrubbing() {
   return isScrubbing;
 }
 
-function appendLandingEvents(cycle, landings) {
-  if (selectedPE || !landings) return;
-  for (const evt of landings) {
+function appendLandingEvents(cycle, landingRange) {
+  if (selectedPE || !landingRange) return;
+  const li = replay.traceData.landingIndex;
+  const { start, end } = landingRange;
+  for (let i = start; i < end; i++) {
     const entry = document.createElement("div");
     entry.className = "trace-entry trace-landing";
-    const dir = evt.dir === "R" ? "local" : `\u2190 ${evt.dir}`;
+    const dirChar = LANDING_DECODE[li.dirs[i]];
+    const dir = dirChar === "R" ? "local" : `\u2190 ${dirChar}`;
     const cycleSpan = document.createElement("span");
     cycleSpan.className = "trace-cycle";
     cycleSpan.textContent = `@${cycle}`;
     entry.appendChild(cycleSpan);
-    entry.appendChild(document.createTextNode(` P${evt.x}.${evt.y} ${dir} C${evt.color}`));
+    entry.appendChild(document.createTextNode(` P${li.xs[i]}.${li.ys[i]} ${dir} C${li.colors[i]}`));
     els.traceLog.appendChild(entry);
   }
 
@@ -74,14 +77,17 @@ function syncTracedPackets(cycle, fraction) {
   }
 }
 
-function sendLandingPackets(landings, msPerCycle, startTime) {
-  const dimY = replay.traceData.dimY;
-  for (const evt of landings) {
-    if (evt.dir === "R") continue;
-    const src = TraceParser.sourceCoords(evt.x, evt.y, evt.dir);
+function sendLandingPackets(landingRange, msPerCycle, startTime) {
+  const td = replay.traceData;
+  const li = td.landingIndex;
+  const { start, end } = landingRange;
+  for (let i = start; i < end; i++) {
+    const dirChar = LANDING_DECODE[li.dirs[i]];
+    if (dirChar === "R") continue;
+    const src = TraceParser.sourceCoords(li.xs[i], li.ys[i], dirChar);
     if (!src) continue;
-    const srcGrid = TraceParser.toGridCoords(src.x, src.y, dimY);
-    const destGrid = TraceParser.toGridCoords(evt.x, evt.y, dimY);
+    const srcGrid = TraceParser.toGridCoords(src.x, src.y, td.dimY);
+    const destGrid = TraceParser.toGridCoords(li.xs[i], li.ys[i], td.dimY);
     grid.sendPacket(srcGrid.row, srcGrid.col, destGrid.row, destGrid.col, msPerCycle, startTime);
   }
 }
@@ -97,7 +103,15 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
   grid.clearPackets();
   grid.resetAllPEs();
 
-  // 1. Reconstruct EX OP state from peStateIndex (compact typed arrays)
+  // 1. Reconstruct EX OP + stall state from peStateIndex (compact typed arrays).
+  //
+  // The peStateIndex interleaves EX OP and stall events in cycle order.
+  // We scan backward from targetCycle to find the most recent EX OP event
+  // (exIdx) and the most recent stall event (stallIdx). Both can be active
+  // simultaneously because they originate from different pipeline stages —
+  // a stall at the issue stage doesn't prevent execution at the EX stage.
+  // setPEBusy sets the op; setPEStall overlays the stall. In pe.draw(),
+  // the op takes visual priority (see execution/stall model in pe.js).
   for (const [key, entry] of td.peStateIndex) {
     const found = TraceParser.findCycleIndexLE(
       { cycles: entry.cycles, length: entry.length },
@@ -115,7 +129,6 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
       if (exIdx >= 0) {
         grid.setPEBusy(row, col, !!entry.busy[exIdx], entry.ops[exIdx], null);
       }
-      // Apply stall overlay if the most recent event is a stall
       if (stallIdx >= 0 && (exIdx < 0 || stallIdx > exIdx)) {
         const reasons = entry.stallReasons[stallIdx];
         const primary = reasons[0];
@@ -458,8 +471,8 @@ export function updateReplayTick(timestamp) {
   const td = replay.traceData;
   const logStart = Math.max(replay.state.currentCycle + 1, endCycle - MAX_LOG_ENTRIES);
   for (let c = logStart; c <= endCycle; c++) {
-    const landings = td.landingsByCycle.get(c);
-    if (landings) appendLandingEvents(c, landings);
+    const range = TraceParser.getLandingRange(td.landingIndex, c);
+    if (range) appendLandingEvents(c, range);
   }
 
   const actualAdvanced = endCycle - replay.state.currentCycle;
@@ -471,8 +484,8 @@ export function updateReplayTick(timestamp) {
 
   // Only reconstruct when the cycle actually changes (not every frame)
   if (endCycle !== lastReconstructedCycle) {
-    const landings = td.landingsByCycle.get(endCycle);
-    reconstructStateAtCycle(endCycle, landings || null);
+    const range = TraceParser.getLandingRange(td.landingIndex, endCycle);
+    reconstructStateAtCycle(endCycle, range);
     lastReconstructedCycle = endCycle;
   }
   const fraction = (timestamp - replay.state.lastTickTime) / msPerCycle;
@@ -547,10 +560,10 @@ export function seekToCycle(targetCycle) {
   // For old traces without wavelet data, show frozen DataPackets for the target cycle
   const td = replay.traceData;
   if (!td.hasWaveletData) {
-    const landings = td.landingsByCycle.get(targetCycle);
-    if (landings) {
+    const range = TraceParser.getLandingRange(td.landingIndex, targetCycle);
+    if (range) {
       const msPerCycle = 1000 / replay.state.speed;
-      sendLandingPackets(landings, msPerCycle, Infinity);
+      sendLandingPackets(range, msPerCycle, Infinity);
     }
   }
 
@@ -561,6 +574,7 @@ export function cancelReplay() {
   handleTraceGeneration++;
   deselectPE();
   replay.state = null;
+  replay.traceData = null;
   lastReconstructedCycle = -1;
   isScrubbing = false;
   scrubWasPlaying = false;
@@ -568,7 +582,7 @@ export function cancelReplay() {
   els.cycleDisplay.textContent = "";
 }
 
-export async function handleTraceFile(event, setGrid) {
+export function handleTraceFile(event, setGrid) {
   const file = event.target.files[0];
   if (!file) return;
   event.target.value = "";
@@ -585,46 +599,81 @@ export async function handleTraceFile(event, setGrid) {
   els.playbackBar.classList.remove("hidden");
   els.cycleDisplay.textContent = "Indexing\u2026";
 
-  const traceData = await TraceParser.index(file, (pct) => {
-    if (myGen !== handleTraceGeneration) return;
-    els.cycleDisplay.textContent = `Indexing\u2026 ${pct}%`;
-  });
-  if (myGen !== handleTraceGeneration) return;
+  const worker = new Worker("trace-worker.js", { type: "module" });
 
-  if (traceData.dimX === 0 || traceData.dimY === 0 || traceData.minCycle > traceData.maxCycle) {
-    els.cycleDisplay.textContent = "Error: invalid trace file";
-    els.playbackBar.classList.add("hidden");
-    deselectPE();
-    replay.traceData = null;
-    return;
-  }
+  worker.onmessage = (e) => {
+    const msg = e.data;
 
-  deselectPE();
-  lastReconstructedCycle = -1;
-  replay.traceData = traceData;
-  setGrid(traceData.dimY, traceData.dimX);
-  animationLoop.start();
-  showPanel("trace");
-  els.traceLog.innerHTML = "";
+    if (msg.type === "progress") {
+      if (myGen !== handleTraceGeneration) return;
+      els.cycleDisplay.textContent = `Indexing\u2026 ${msg.pct}%`;
+      return;
+    }
 
-  const { minCycle, maxCycle } = traceData;
-  const speed = 4;
-  els.speedDisplay.textContent = `${speed} cyc/s`;
+    if (msg.type === "error") {
+      worker.terminate();
+      if (myGen !== handleTraceGeneration) return;
+      els.cycleDisplay.textContent = `Error: ${msg.message}`;
+      els.playbackBar.classList.add("hidden");
+      return;
+    }
 
-  replay.state = {
-    currentCycle: minCycle - 1,
-    speed,
-    playing: false,
-    lastTickTime: performance.now(),
-    minCycle,
-    maxCycle,
+    if (msg.type === "done") {
+      worker.terminate();
+      if (myGen !== handleTraceGeneration) return;
+
+      // Reconstruct Maps from the transferred entry arrays
+      const d = msg.data;
+      const traceData = {
+        dimX: d.dimX,
+        dimY: d.dimY,
+        landingIndex: d.landingIndex,
+        peStateIndex: new Map(d.peStateEntries),
+        waveletIndex: new Map(d.waveletEntries),
+        hasWaveletData: d.hasWaveletData,
+        minCycle: d.minCycle,
+        maxCycle: d.maxCycle,
+        totalEvents: d.totalEvents,
+      };
+
+      if (traceData.dimX === 0 || traceData.dimY === 0 || traceData.minCycle > traceData.maxCycle) {
+        els.cycleDisplay.textContent = "Error: invalid trace file";
+        els.playbackBar.classList.add("hidden");
+        deselectPE();
+        replay.traceData = null;
+        return;
+      }
+
+      deselectPE();
+      lastReconstructedCycle = -1;
+      replay.traceData = traceData;
+      setGrid(traceData.dimY, traceData.dimX);
+      animationLoop.start();
+      showPanel("trace");
+      els.traceLog.innerHTML = "";
+
+      const { minCycle, maxCycle } = traceData;
+      const speed = 4;
+      els.speedDisplay.textContent = `${speed} cyc/s`;
+
+      replay.state = {
+        currentCycle: minCycle - 1,
+        speed,
+        playing: false,
+        lastTickTime: performance.now(),
+        minCycle,
+        maxCycle,
+      };
+
+      els.scrubBar.min = minCycle - 1;
+      els.scrubBar.max = maxCycle;
+      els.scrubBar.value = minCycle - 1;
+      els.playPauseBtn.textContent = "\u25B6";
+      updateScrubUI();
+    }
   };
 
-  els.scrubBar.min = minCycle - 1;
-  els.scrubBar.max = maxCycle;
-  els.scrubBar.value = minCycle - 1;
-  els.playPauseBtn.textContent = "\u25B6";
-  updateScrubUI();
+  worker.postMessage({ file });
 }
 
 function handleTraceLogClick(e) {
