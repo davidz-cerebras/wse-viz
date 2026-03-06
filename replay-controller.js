@@ -541,6 +541,48 @@ export function adjustSpeed(factor) {
   els.speedDisplay.textContent = `${newSpeed} cyc/s`;
 }
 
+// Step one cycle forward or backward with smooth animation.
+// Rate-limited to 16 steps/second — further presses are ignored until
+// the animation for the current step completes (62.5ms).
+const STEP_MS = 1000 / 16;
+let lastStepTime = 0;
+let stepAnimationId = 0;
+
+export function stepCycle(direction) {
+  if (!replay.state || !replay.traceData) return;
+  const now = performance.now();
+  if (now - lastStepTime < STEP_MS) return;
+  lastStepTime = now;
+
+  if (replay.state.playing) {
+    replay.state.playing = false;
+    els.playPauseBtn.textContent = "\u25B6";
+  }
+
+  const targetCycle = replay.state.currentCycle + direction;
+  if (targetCycle < replay.state.minCycle - 1 || targetCycle > replay.state.maxCycle) return;
+
+  seekToCycle(targetCycle);
+
+  // Animate TracedPackets smoothly over the step duration.
+  // Interpolate fractional cycle from the previous cycle to the new one.
+  const startCycle = targetCycle - direction;
+  const stepStart = now;
+  if (stepAnimationId) cancelAnimationFrame(stepAnimationId);
+
+  function stepAnimate(timestamp) {
+    if (!replay.state || replay.state.playing) return;
+    const t = Math.min((timestamp - stepStart) / STEP_MS, 1);
+    const fc = startCycle + direction * t;
+    syncTracedPackets(targetCycle, fc - targetCycle);
+    animationLoop.start();
+    if (t < 1) {
+      stepAnimationId = requestAnimationFrame(stepAnimate);
+    }
+  }
+  stepAnimationId = requestAnimationFrame(stepAnimate);
+}
+
 export function seekToCycle(targetCycle) {
   if (!replay.state || !replay.traceData || !Number.isFinite(targetCycle)) return;
 

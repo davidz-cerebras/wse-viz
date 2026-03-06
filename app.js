@@ -3,7 +3,7 @@ import { AnimationLoop } from "./animation.js";
 import { runAllReduce, spmvPattern, conjugateGradient } from "./algorithms.js";
 import {
   initReplay, setReplayGrid, getReplayState, getIsScrubbing,
-  updateReplayTick, togglePlayback, adjustSpeed,
+  updateReplayTick, togglePlayback, adjustSpeed, stepCycle,
   cancelReplay, handleTraceFile, setupScrubListeners,
   selectPE, deselectPE,
 } from "./replay-controller.js";
@@ -132,6 +132,12 @@ function setupEventListeners() {
       if (!getIsScrubbing()) togglePlayback();
     } else if (e.key === "Escape" || e.key === "q") {
       if (grid && grid.viewport) resetZoom();
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      stepCycle(1);
+    } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      stepCycle(-1);
     } else if (e.key === "]") {
       adjustSpeed(2);
     } else if (e.key === "[") {

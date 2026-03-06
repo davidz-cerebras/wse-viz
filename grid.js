@@ -1,6 +1,6 @@
 import { PE } from "./pe.js";
 import { DataPacket } from "./packet.js";
-import { CELL_SIZE, RAMP_ARROW_DEPTH, RAMP_LATERAL, RAMP_ARROW_SIZE } from "./constants.js";
+import { CELL_SIZE, RAMP_ARROW_DEPTH, RAMP_ARROW_LATERAL, RAMP_ARROW_SIZE } from "./constants.js";
 
 export class Grid {
   constructor(rows, cols, cellSize, gap) {
@@ -181,7 +181,7 @@ export class Grid {
 
   drawRamps(ctx, minR, maxR, minC, maxC) {
     const depth = RAMP_ARROW_DEPTH;
-    const lat = RAMP_LATERAL;
+    const lat = RAMP_ARROW_LATERAL;
     const arrowSize = RAMP_ARROW_SIZE;
 
     // Collect active ramps from TracedPackets

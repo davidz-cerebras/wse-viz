@@ -258,15 +258,20 @@ export class TracedPacket {
 
     const dimY = this.dimY;
 
-    // Phase 1: Arriving at on-ramp → crossing to off-ramp
+    // Phase 1: At on-ramp, waiting for departure.
+    // The dot sits at the on-ramp from arrival until one cycle before departure,
+    // then crosses to the off-ramp during the final cycle before departing.
+    // This reflects the physical model: the wavelet is in the fabric switch
+    // being processed, not physically traversing the PE.
     if (depCycle !== null && fc < depCycle) {
       const from = onRampPos(grid, wp.x, wp.y, dimY, wp.arriveDir);
+      if (!from) return null;
+      const crossStart = depCycle - 1; // begin crossing one cycle before departure
+      if (fc <= crossStart) return from; // sitting at on-ramp
+      // Crossing from on-ramp to off-ramp in the final cycle
       const to = offRampPos(grid, wp.x, wp.y, dimY, wp.departDir);
-      if (!from || !to) return null;
-
-      const span = depCycle - wp.cycle;
-      if (span <= 0) return from;
-      const t = (fc - wp.cycle) / span;
+      if (!to) return from;
+      const t = fc - crossStart; // 0..1 over the final cycle
       return {
         x: from.x + (to.x - from.x) * t,
         y: from.y + (to.y - from.y) * t,
