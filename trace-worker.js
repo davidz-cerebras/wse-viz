@@ -22,7 +22,8 @@ self.onmessage = async (e) => {
         li.xs.buffer, li.ys.buffer, li.colors.buffer, li.dirs.buffer);
     }
     for (const [, entry] of traceData.peStateIndex) {
-      transfer.push(entry.cycles.buffer, entry.busy.buffer, entry.stall.buffer);
+      transfer.push(entry.cycles.buffer, entry.busy.buffer,
+        entry.opIds.buffer, entry.predIds.buffer, entry.stall.buffer);
     }
     for (const [, entry] of traceData.waveletIndex) {
       const h = entry.hops;
@@ -41,6 +42,8 @@ self.onmessage = async (e) => {
         dimY: traceData.dimY,
         landingIndex: traceData.landingIndex,
         peStateEntries,
+        opLookup: traceData.opLookup,
+        predLookup: traceData.predLookup,
         waveletEntries,
         hasWaveletData: traceData.hasWaveletData,
         minCycle: traceData.minCycle,

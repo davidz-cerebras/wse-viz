@@ -127,7 +127,7 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
       const [x, y] = key.split(",").map(Number);
       const { row, col } = TraceParser.toGridCoords(x, y, td.dimY);
       if (exIdx >= 0) {
-        grid.setPEBusy(row, col, !!entry.busy[exIdx], entry.ops[exIdx], null);
+        grid.setPEBusy(row, col, !!entry.busy[exIdx], td.opLookup[entry.opIds[exIdx]], null);
       }
       if (stallIdx >= 0 && (exIdx < 0 || stallIdx > exIdx)) {
         const reasons = entry.stallReasons[stallIdx];
@@ -170,7 +170,8 @@ export function selectPE(row, col, traceX, traceY) {
   }
 
   const key = `${traceX},${traceY}`;
-  const entry = replay.traceData.peStateIndex.get(key);
+  const td = replay.traceData;
+  const entry = td.peStateIndex.get(key);
 
   grid.selectPE(row, col);
   peTraceScrollLock = false;
@@ -200,8 +201,8 @@ export function selectPE(row, col, traceX, traceY) {
           curStallReason = entry.stallReasons[evtIdx];
         } else {
           curBusy = entry.busy[evtIdx];
-          curOp = entry.ops[evtIdx];
-          curPred = entry.preds[evtIdx];
+          curOp = td.opLookup[entry.opIds[evtIdx]];
+          curPred = td.predLookup[entry.predIds[evtIdx]];
           curStallReason = null;
         }
         evtIdx++;
@@ -629,6 +630,8 @@ export function handleTraceFile(event, setGrid) {
         dimY: d.dimY,
         landingIndex: d.landingIndex,
         peStateIndex: new Map(d.peStateEntries),
+        opLookup: d.opLookup,
+        predLookup: d.predLookup,
         waveletIndex: new Map(d.waveletEntries),
         hasWaveletData: d.hasWaveletData,
         minCycle: d.minCycle,

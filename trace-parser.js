@@ -9,6 +9,20 @@ const pipeStallRegex =
 const waveletRegex =
   /^@(\d+) P(\d+)\.(\d+) \(\w+\) wavelet C(\d+) ctrl=(\d), idx=([0-9a-fA-F]+), data=([0-9a-fA-F]+) \([^)]*\([^)]*\)\), half=(\d), ident=([0-9a-fA-F]+) landing=([RENWSD-]) departing=\/(.{5})\//;
 
+// In JSC (Safari), regex captures and String.substring() return "ropes" —
+// lightweight references into the parent string. Storing a rope long-term
+// prevents the entire parent from being GC'd. When parsing a 27GB file in
+// 10MB chunks, each retained rope keeps its ~10MB chunk alive. This helper
+// forces a flat copy by round-tripping through TextEncoder/TextDecoder,
+// definitively breaking any rope reference. Only used for the few strings
+// that are stored long-term (wavelet idents, opcode/pred intern keys,
+// stall reason labels) — all are short (< 20 chars), so the cost is minimal.
+const _enc = new TextEncoder();
+const _dec = new TextDecoder();
+function flatStr(s) {
+  return s == null ? s : _dec.decode(_enc.encode(s));
+}
+
 // Landing direction encoding for typed arrays
 const LANDING_ENCODE = { R: 0, E: 1, N: 2, W: 3, S: 4, "-": 5, D: 6 };
 export const LANDING_DECODE = ["R", "E", "N", "W", "S", "-", "D"];
@@ -107,7 +121,7 @@ function parseWavelet(line) {
     idx: m[6],
     data: m[7],
     half: m[8] === "1",
-    ident: m[9],
+    ident: flatStr(m[9]),
     landing: m[10],
     departing,
     colorswap: csMatch ? parseInt(csMatch[1]) : null,
@@ -142,13 +156,13 @@ function classifyPipeStall(msg) {
   if (accumMatch) return { label: `A${accumMatch[1]}` };
 
   const regMatch = msg.match(/^(R\d+) ilock/);
-  if (regMatch) return { label: regMatch[1] };
+  if (regMatch) return { label: flatStr(regMatch[1]) };
 
   if (msg.startsWith("write_pending/read conflict MEM"))
     return { label: "MEM" };
 
   const dsrMatch = msg.match(/^dependent (S\dDS\d)/);
-  if (dsrMatch) return { label: dsrMatch[1] };
+  if (dsrMatch) return { label: flatStr(dsrMatch[1]) };
 
   return null;
 }
@@ -178,8 +192,19 @@ export class TraceParser {
 
     const dimRegex = /^@\d+ dimX=(\d+), dimY=(\d+)/;
     const prevExState = new Map();
-    const peStateTemp = new Map();   // temporary: arrays of objects
-    const waveletTemp = new Map();   // ident → { ident, color, ctrl, hops: [] }
+    // peStateTemp stores flat parallel arrays per PE to avoid millions of
+    // {cycle, busy, op, pred, stall, stallReasons} JS objects during parsing.
+    // Opcodes and predicates are interned as uint8 IDs via small lookup tables.
+    const peStateTemp = new Map();   // key → { cycles:[], busy:[], opIds:[], predIds:[], stall:[], stallReasons:[] }
+    const opIntern = new Map();      // opcode string → uint8 id
+    const predIntern = new Map();    // pred string → uint8 id
+    opIntern.set(null, 0);          // id 0 = null (no op)
+    predIntern.set(null, 0);        // id 0 = null (no pred)
+    let nextOpId = 1;
+    let nextPredId = 1;
+    // Wavelet hops stored as flat parallel arrays per ident to avoid
+    // millions of {cycle, x, y, landing, departing} JS objects (~1.5GB → ~266MB).
+    const waveletTemp = new Map();   // ident → { ident, color, ctrl, cycles:[], xs:[], ys:[], landings:[], departings:[] }
     // Landings accumulated in flat temporary arrays, compacted to typed arrays
     // at the end. This avoids millions of {x, y, color, dir} JS objects.
     const tmpLandCycles = [];
@@ -189,22 +214,45 @@ export class TraceParser {
     const tmpLandDirs = [];
     let hasWaveletData = false;
 
+    function getPEEntry(key) {
+      let e = peStateTemp.get(key);
+      if (!e) {
+        e = { cycles: [], busy: [], opIds: [], predIds: [], stall: [], stallReasons: [] };
+        peStateTemp.set(key, e);
+      }
+      return e;
+    }
+
+    function internOp(op) {
+      let id = opIntern.get(op);
+      if (id === undefined) { id = nextOpId++; opIntern.set(flatStr(op), id); }
+      return id;
+    }
+
+    function internPred(pred) {
+      let id = predIntern.get(pred);
+      if (id === undefined) { id = nextPredId++; predIntern.set(flatStr(pred), id); }
+      return id;
+    }
+
     // Accumulate stall reasons: if the last event for this PE is a stall
     // at the same cycle, append to it; otherwise create a new stall event.
     const addStall = (key, cycle, reason, type) => {
-      if (!peStateTemp.has(key)) peStateTemp.set(key, []);
-      const events = peStateTemp.get(key);
-      const last = events.length > 0 ? events[events.length - 1] : null;
-      if (last && last.stall && last.cycle === cycle) {
+      const pe = getPEEntry(key);
+      const len = pe.cycles.length;
+      if (len > 0 && pe.stall[len - 1] && pe.cycles[len - 1] === cycle) {
         // Same PE, same cycle: accumulate if not already present
-        if (!last.stallReasons.some(r => r.reason === reason))
-          last.stallReasons.push({ reason, type });
+        const existing = pe.stallReasons[len - 1];
+        if (!existing.some(r => r.reason === reason))
+          existing.push({ reason, type });
         return;
       }
-      events.push({
-        cycle, busy: false, op: null, pred: null,
-        stall: true, stallReasons: [{ reason, type }],
-      });
+      pe.cycles.push(cycle);
+      pe.busy.push(0);
+      pe.opIds.push(0);
+      pe.predIds.push(0);
+      pe.stall.push(1);
+      pe.stallReasons.push([{ reason, type }]);
     };
 
     const processLine = (line) => {
@@ -251,12 +299,13 @@ export class TraceParser {
         if (isIdle) {
           if (prevExState.get(key) !== "0") {
             prevExState.set(key, "0");
-            if (!peStateTemp.has(key)) peStateTemp.set(key, []);
-            const cycle = +line.substring(1, sp1);
-            peStateTemp.get(key).push({
-              cycle, busy: false, op: null, pred: null,
-              stall: false, stallReasons: null,
-            });
+            const pe = getPEEntry(key);
+            pe.cycles.push(+line.substring(1, sp1));
+            pe.busy.push(0);
+            pe.opIds.push(0);
+            pe.predIds.push(0);
+            pe.stall.push(0);
+            pe.stallReasons.push(null);
           }
         } else {
           // Non-IDLE: extract opcode via regex (only ~2% of EX OP lines)
@@ -267,12 +316,13 @@ export class TraceParser {
           const state = `1:${pred || ""}:${op}`;
           if (prevExState.get(key) !== state) {
             prevExState.set(key, state);
-            if (!peStateTemp.has(key)) peStateTemp.set(key, []);
-            const cycle = +line.substring(1, sp1);
-            peStateTemp.get(key).push({
-              cycle, busy: true, op, pred,
-              stall: false, stallReasons: null,
-            });
+            const pe = getPEEntry(key);
+            pe.cycles.push(+line.substring(1, sp1));
+            pe.busy.push(1);
+            pe.opIds.push(internOp(op));
+            pe.predIds.push(internPred(pred));
+            pe.stall.push(0);
+            pe.stallReasons.push(null);
           }
         }
         return;
@@ -295,13 +345,15 @@ export class TraceParser {
         totalEvents++;
         let entry = waveletTemp.get(wv.ident);
         if (!entry) {
-          entry = { ident: wv.ident, color: wv.color, ctrl: wv.ctrl, hops: [] };
+          entry = { ident: wv.ident, color: wv.color, ctrl: wv.ctrl,
+                    cycles: [], xs: [], ys: [], landings: [], departings: [] };
           waveletTemp.set(wv.ident, entry);
         }
-        entry.hops.push({
-          cycle: wv.cycle, x: wv.x, y: wv.y,
-          landing: wv.landing, departing: wv.departing,
-        });
+        entry.cycles.push(wv.cycle);
+        entry.xs.push(wv.x);
+        entry.ys.push(wv.y);
+        entry.landings.push(wv.landing);
+        entry.departings.push(wv.departing);
         return;
       }
 
@@ -319,84 +371,104 @@ export class TraceParser {
       }
     };
 
-    const reader = file
-      .stream()
-      .pipeThrough(new TextDecoderStream())
-      .getReader();
-    let partial = "";
-
-    // Progress tracking: report percentage via onProgress callback.
-    // When running in a Web Worker, onProgress posts a message to the
-    // main thread (no need to yield with setTimeout).
+    // Read the file in explicit slices with byte-level carryover to prevent
+    // Safari/JSC from retaining all decoded text via substring ropes.
+    // If we used string-based `partial += text`, JSC's rope optimization
+    // would chain every chunk's decoded text across iterations, causing
+    // the entire file (~27GB) to be held in memory simultaneously.
+    // Instead, leftover bytes after the last newline are kept as a raw
+    // Uint8Array, breaking the reference chain between iterations.
+    const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB
+    const decoder = new TextDecoder();
     const totalBytes = file.size;
-    let bytesRead = 0;
+    let carryover = new Uint8Array(0);
     let lastPct = -1;
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    for (let offset = 0; offset < totalBytes; offset += CHUNK_SIZE) {
+      const end = Math.min(offset + CHUNK_SIZE, totalBytes);
+      const blob = file.slice(offset, end);
+      const raw = new Uint8Array(await blob.arrayBuffer());
 
-      partial += value;
-      const lines = partial.split("\n");
-      partial = lines.pop();
-
-      for (const line of lines) {
-        processLine(line);
+      // Prepend carryover bytes from the previous chunk
+      let bytes;
+      if (carryover.length > 0) {
+        bytes = new Uint8Array(carryover.length + raw.length);
+        bytes.set(carryover);
+        bytes.set(raw, carryover.length);
+      } else {
+        bytes = raw;
       }
 
-      // Report progress once per chunk (trace files are pure ASCII so
-      // decoded text length ≈ byte count).
+      // Find the last newline to split on a line boundary
+      let lastNL = bytes.length - 1;
+      while (lastNL >= 0 && bytes[lastNL] !== 10) lastNL--; // 10 = '\n'
+
+      if (lastNL < 0) {
+        // No newline in entire buffer — all carryover for next chunk
+        carryover = bytes.slice(0);
+        continue;
+      }
+
+      // Decode up to the last newline; keep remaining bytes as carryover
+      const text = decoder.decode(bytes.subarray(0, lastNL + 1));
+      carryover = lastNL + 1 < bytes.length ? bytes.slice(lastNL + 1) : new Uint8Array(0);
+
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length - 1; i++) {
+        processLine(lines[i]);
+      }
+
       if (onProgress) {
-        bytesRead += value.length;
-        const pct = Math.round((bytesRead / totalBytes) * 100);
+        const pct = Math.round((end / totalBytes) * 100);
         if (pct !== lastPct) { lastPct = pct; onProgress(pct); }
       }
     }
 
-    if (partial.length > 0) {
-      processLine(partial);
+    // Handle final carryover (file may not end with \n)
+    if (carryover.length > 0) {
+      processLine(decoder.decode(carryover));
     }
     if (onProgress && lastPct < 100) onProgress(100);
 
-    // Compact peStateIndex into typed arrays
+    // Build reverse lookup tables for interned opcodes and predicates
+    const opLookup = new Array(nextOpId);
+    for (const [str, id] of opIntern) opLookup[id] = str;
+    const predLookup = new Array(nextPredId);
+    for (const [str, id] of predIntern) predLookup[id] = str;
+
+    // Compact peStateIndex: copy flat parallel arrays to typed arrays.
+    // Ops and preds are stored as Uint8Array IDs with lookup tables,
+    // reducing ~154MB of JS string arrays to ~10MB of typed arrays.
     const peStateIndex = new Map();
-    for (const [key, events] of peStateTemp) {
-      const len = events.length;
-      const cycles = new Float64Array(len);
-      const busy = new Uint8Array(len);
-      const ops = new Array(len);
-      const preds = new Array(len);
-      const stall = new Uint8Array(len);
-      const stallReasons = new Array(len);
-      for (let i = 0; i < len; i++) {
-        const e = events[i];
-        cycles[i] = e.cycle;
-        busy[i] = e.busy ? 1 : 0;
-        ops[i] = e.op;
-        preds[i] = e.pred;
-        stall[i] = e.stall ? 1 : 0;
-        stallReasons[i] = e.stallReasons; // array of {reason, type} or null
-      }
-      peStateIndex.set(key, { cycles, busy, ops, preds, stall, stallReasons, length: len });
+    for (const [key, pe] of peStateTemp) {
+      const len = pe.cycles.length;
+      peStateIndex.set(key, {
+        cycles: new Float64Array(pe.cycles),
+        busy: new Uint8Array(pe.busy),
+        opIds: new Uint8Array(pe.opIds),
+        predIds: new Uint8Array(pe.predIds),
+        stall: new Uint8Array(pe.stall),
+        stallReasons: pe.stallReasons, // kept as JS array (sparse, mostly null)
+        length: len,
+      });
     }
 
-    // Compact wavelet hops into typed arrays
+    // Compact wavelet hops into typed arrays. The temp data is already in
+    // flat parallel arrays, so we just copy to typed arrays.
     const waveletIndex = new Map();
     for (const [ident, entry] of waveletTemp) {
-      const hops = entry.hops;
-      const len = hops.length;
+      const len = entry.cycles.length;
       const cycles = new Float64Array(len);
       const xs = new Uint16Array(len);
       const ys = new Uint16Array(len);
       const landings = new Uint8Array(len);
       const departings = new Uint8Array(len);
       for (let i = 0; i < len; i++) {
-        const h = hops[i];
-        cycles[i] = h.cycle;
-        xs[i] = h.x;
-        ys[i] = h.y;
-        landings[i] = LANDING_ENCODE[h.landing] ?? 5;
-        departings[i] = encodeDeparting(h.departing);
+        cycles[i] = entry.cycles[i];
+        xs[i] = entry.xs[i];
+        ys[i] = entry.ys[i];
+        landings[i] = LANDING_ENCODE[entry.landings[i]] ?? 5;
+        departings[i] = encodeDeparting(entry.departings[i]);
       }
       waveletIndex.set(ident, {
         ident: entry.ident,
@@ -463,6 +535,8 @@ export class TraceParser {
       dimY,
       landingIndex,
       peStateIndex,
+      opLookup,     // uint8 id → opcode string (or null for id 0)
+      predLookup,   // uint8 id → pred string (or null for id 0)
       waveletIndex,
       hasWaveletData,
       minCycle,
