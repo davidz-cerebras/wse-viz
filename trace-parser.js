@@ -118,11 +118,8 @@ function parseWavelet(line) {
     y: parseInt(m[3]),
     color: parseInt(m[4]),
     ctrl: m[5] === "1",
-    idx: m[6],
-    data: m[7],
-    half: m[8] === "1",
     ident: flatStr(m[9]),
-    landing: m[10],
+    landingEncoded: LANDING_ENCODE[m[10]] ?? 5, // encode immediately to avoid JSC rope retention
     departing,
     colorswap: csMatch ? parseInt(csMatch[1]) : null,
     lf: line.includes(", lf=1"),
@@ -352,7 +349,7 @@ export class TraceParser {
         entry.cycles.push(wv.cycle);
         entry.xs.push(wv.x);
         entry.ys.push(wv.y);
-        entry.landings.push(wv.landing);
+        entry.landings.push(wv.landingEncoded);
         entry.departings.push(wv.departing);
         return;
       }
@@ -467,7 +464,7 @@ export class TraceParser {
         cycles[i] = entry.cycles[i];
         xs[i] = entry.xs[i];
         ys[i] = entry.ys[i];
-        landings[i] = LANDING_ENCODE[entry.landings[i]] ?? 5;
+        landings[i] = entry.landings[i];
         departings[i] = encodeDeparting(entry.departings[i]);
       }
       waveletIndex.set(ident, {
