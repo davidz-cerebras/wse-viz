@@ -1,7 +1,8 @@
 import {
-  PACKET_RADIUS, PACKET_HALO_RADIUS,
-  PACKET_COLOR, PACKET_CTRL_COLOR,
-  PACKET_HALO_COLOR, PACKET_CTRL_HALO_COLOR, PACKET_LF_HALO_COLOR,
+  PACKET_RADIUS_DISC, PACKET_RADIUS_HALO,
+  PACKET_COLOR_DISC_DATA, PACKET_COLOR_DISC_CTRL,
+  PACKET_COLOR_HALO_DATA, PACKET_COLOR_HALO_CTRL, PACKET_COLOR_HALO_LF,
+  PACKET_COLOR_LABEL_DATA, PACKET_COLOR_LABEL_CTRL,
 } from "./constants.js";
 
 // "color" is a fabric routing tag (an integer), not a visual color.
@@ -9,13 +10,13 @@ import {
 // "ctrl" = control wavelet (pink), "lf" = last-in-flight (blue halo).
 export function drawPacketDot(ctx, x, y, color, ctrl, lf) {
   ctx.beginPath();
-  ctx.arc(x, y, PACKET_RADIUS, 0, Math.PI * 2);
-  ctx.fillStyle = ctrl ? PACKET_CTRL_COLOR : PACKET_COLOR;
+  ctx.arc(x, y, PACKET_RADIUS_DISC, 0, Math.PI * 2);
+  ctx.fillStyle = ctrl ? PACKET_COLOR_DISC_CTRL : PACKET_COLOR_DISC_DATA;
   ctx.fill();
 
   ctx.beginPath();
-  ctx.arc(x, y, PACKET_HALO_RADIUS, 0, Math.PI * 2);
-  ctx.strokeStyle = lf ? PACKET_LF_HALO_COLOR : (ctrl ? PACKET_CTRL_HALO_COLOR : PACKET_HALO_COLOR);
+  ctx.arc(x, y, PACKET_RADIUS_HALO, 0, Math.PI * 2);
+  ctx.strokeStyle = lf ? PACKET_COLOR_HALO_LF : (ctrl ? PACKET_COLOR_HALO_CTRL : PACKET_COLOR_HALO_DATA);
   ctx.lineWidth = 2;
   ctx.stroke();
 
@@ -23,7 +24,7 @@ export function drawPacketDot(ctx, x, y, color, ctrl, lf) {
     const label = String(color);
     const fontSize = Math.min(4, 8 / label.length);
     ctx.font = `${fontSize}px monospace`;
-    ctx.fillStyle = ctrl ? "rgba(120, 50, 80, 0.9)" : "rgba(140, 110, 20, 0.9)";
+    ctx.fillStyle = ctrl ? PACKET_COLOR_LABEL_CTRL : PACKET_COLOR_LABEL_DATA;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(label, x, y + fontSize * 0.09);

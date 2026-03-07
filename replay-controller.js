@@ -1,5 +1,6 @@
 import { TraceParser, LANDING_DECODE } from "./trace-parser.js";
 import { extractBranches, TracedPacket } from "./wavelet.js";
+import { buildOpEntryLookup } from "./pe.js";
 import { MAX_LOG_ENTRIES, PE_TRACE_WINDOW } from "./constants.js";
 
 let grid, els, animationLoop, showPanel;
@@ -102,18 +103,21 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
   if (!td) return;
 
   grid.clearPackets();
-  grid.resetAllPEs();
 
-  // 1. Reconstruct EX OP + stall state from peStateIndex (compact typed arrays).
+  // 1. Reconstruct EX OP + stall state from peStateList (pre-computed grid coords).
+  //
+  // Instead of resetAllPEs() + re-apply, we directly set each PE to its
+  // correct state (busy/idle/stalled). This avoids touching each PE twice.
   //
   // The peStateIndex interleaves EX OP and stall events in cycle order.
   // We scan backward from targetCycle to find the most recent EX OP event
   // (exIdx) and the most recent stall event (stallIdx). Both can be active
   // simultaneously because they originate from different pipeline stages —
   // a stall at the issue stage doesn't prevent execution at the EX stage.
-  // setPEBusy sets the op; setPEStall overlays the stall. In pe.draw(),
+  // setPEBusy sets the op (and clears stall); setPEStall overlays the stall. In pe.draw(),
   // the op takes visual priority (see execution/stall model in pe.js).
-  for (const [key, entry] of td.peStateIndex) {
+  for (const pe of td.peStateList) {
+    const entry = pe.entry;
     const found = TraceParser.findCycleIndexLE(
       { cycles: entry.cycles, length: entry.length },
       targetCycle,
@@ -125,25 +129,33 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
         if (!entry.stall[i]) { exIdx = i; break; }
         if (stallIdx < 0) stallIdx = i;
       }
-      const [x, y] = key.split(",").map(Number);
-      const { row, col } = TraceParser.toGridCoords(x, y, td.dimY);
       if (exIdx >= 0) {
-        grid.setPEBusy(row, col, !!entry.busy[exIdx], td.opLookup[entry.opIds[exIdx]], null);
+        const opId = entry.opIds[exIdx];
+        grid.setPEBusy(pe.row, pe.col, !!entry.busy[exIdx], td.opLookup[opId], td.opEntryLookup[opId]);
+      } else {
+        grid.setPEBusy(pe.row, pe.col, false, null, null);
       }
       if (stallIdx >= 0 && (exIdx < 0 || stallIdx > exIdx)) {
         const reasons = entry.stallReasons[stallIdx];
         const primary = reasons[0];
-        grid.setPEStall(row, col, primary.type, primary.reason);
+        grid.setPEStall(pe.row, pe.col, primary.type, primary.reason);
       }
+    } else {
+      grid.setPEBusy(pe.row, pe.col, false, null, null);
     }
   }
 
-  // 2. Create packets for in-flight wavelets or DataPackets for old traces
-  if (td.hasWaveletData) {
-    for (const [, wv] of td.waveletIndex) {
+  // 2. Create packets for in-flight wavelets or DataPackets for old traces.
+  // waveletList is sorted by firstCycle, so we scan with early termination to skip wavelets
+  // that start after targetCycle, and iterate only the relevant prefix.
+  if (td.waveletList) {
+    const wvList = td.waveletList;
+    for (let wi = 0; wi < wvList.length; wi++) {
+      const wv = wvList[wi];
       const firstCycle = wv.hops.cycles[0];
+      if (firstCycle > targetCycle) break; // sorted: all remaining start later
       const lastCycle = wv.hops.cycles[wv.hops.length - 1];
-      if (firstCycle > targetCycle || lastCycle < targetCycle) continue;
+      if (lastCycle < targetCycle) continue;
       const branches = getBranches(wv);
       for (const waypoints of branches) {
         const branchEnd = waypoints[waypoints.length - 1].cycle;
@@ -508,7 +520,7 @@ export function updateReplayTick(timestamp) {
   }
 }
 
-export function resumePlayback() {
+function resumePlayback() {
   if (!replay.state || replay.state.currentCycle >= replay.state.maxCycle) return;
   const now = performance.now();
   const msPerCycle = 1000 / replay.state.speed;
@@ -588,7 +600,7 @@ export function stepCycle(direction) {
   stepAnimationId = requestAnimationFrame(stepAnimate);
 }
 
-export function seekToCycle(targetCycle) {
+function seekToCycle(targetCycle) {
   if (!replay.state || !replay.traceData || !Number.isFinite(targetCycle)) return;
 
   grid.resetTimers();
@@ -621,6 +633,8 @@ export function seekToCycle(targetCycle) {
 export function cancelReplay() {
   handleTraceGeneration++;
   if (activeWorker) { activeWorker.terminate(); activeWorker = null; }
+  if (stepAnimationId) { cancelAnimationFrame(stepAnimationId); stepAnimationId = 0; }
+  lastStepTime = 0;
   deselectPE();
   replay.state = null;
   replay.traceData = null;
@@ -694,8 +708,8 @@ export function handleTraceFile(event, setGrid) {
       worker.terminate(); activeWorker = null;
       if (myGen !== handleTraceGeneration) return;
       els.loadingBar.classList.add("hidden");
+      els.playbackControls.classList.remove("hidden");
       els.cycleDisplay.textContent = `Error: ${msg.message}`;
-      els.playbackBar.classList.add("hidden");
       return;
     }
 
@@ -708,14 +722,37 @@ export function handleTraceFile(event, setGrid) {
 
       // Reconstruct Maps from the transferred entry arrays
       const d = msg.data;
+      const peStateIndex = new Map(d.peStateEntries);
+      const waveletIndex = new Map(d.waveletEntries);
+
+      // Pre-compute grid row/col for each PE key to avoid
+      // key.split(",").map(Number) on every reconstruction (~3650× per frame).
+      const peStateList = [];
+      for (const [key, entry] of peStateIndex) {
+        const [x, y] = key.split(",").map(Number);
+        const { row, col } = TraceParser.toGridCoords(x, y, d.dimY);
+        peStateList.push({ key, entry, row, col });
+      }
+
+      // Pre-sort wavelets by first cycle for fast range filtering.
+      // At 512 Hz with 63K wavelets, iterating all of them per frame is too slow.
+      // Sorted by firstCycle, we binary-search to find the start of the active range.
+      let waveletList = null;
+      if (d.hasWaveletData) {
+        waveletList = [...waveletIndex.values()];
+        waveletList.sort((a, b) => a.hops.cycles[0] - b.hops.cycles[0]);
+      }
+
       const traceData = {
         dimX: d.dimX,
         dimY: d.dimY,
         landingIndex: d.landingIndex,
-        peStateIndex: new Map(d.peStateEntries),
+        peStateIndex,
+        peStateList,
         opLookup: d.opLookup,
+        opEntryLookup: buildOpEntryLookup(d.opLookup),
         predLookup: d.predLookup,
-        waveletIndex: new Map(d.waveletEntries),
+        waveletList,
         hasWaveletData: d.hasWaveletData,
         minCycle: d.minCycle,
         maxCycle: d.maxCycle,

@@ -1,5 +1,5 @@
 import { drawPacketDot } from "./draw-utils.js";
-import { CELL_SIZE, RAMP_DEPTH, RAMP_LATERAL } from "./constants.js";
+import { RAMP_DEPTH, RAMP_LATERAL } from "./constants.js";
 import { LANDING_DECODE, decodeDeparting } from "./trace-parser.js";
 
 // Direction → trace coordinate delta
@@ -180,8 +180,7 @@ function _rampPos(grid, x, y, dimY, dir, isOnRamp) {
   const pe = grid.getPE(row, col);
   if (!pe) return null;
 
-  const cx = pe.x + CELL_SIZE / 2;
-  const cy = pe.y + CELL_SIZE / 2;
+  const { cx, cy } = pe;
 
   if (!dir || dir === "R") return { x: cx, y: cy };
 
@@ -227,14 +226,12 @@ export class TracedPacket {
     this.lf = lf;       // true = last-in-flight
     this.startCycle = waypoints[0].cycle;
     this.endCycle = waypoints[waypoints.length - 1].cycle;
-    this.currentCycle = this.startCycle;
     this.fractionalCycle = this.startCycle;
     this.done = false;
     this.visible = false;
   }
 
   setCycle(cycle) {
-    this.currentCycle = cycle;
     this.done = cycle > this.endCycle;
     this.visible = cycle >= this.startCycle;
   }

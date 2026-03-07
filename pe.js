@@ -1,109 +1,168 @@
-import { PE_ON_DURATION, PE_BRIGHTEN_DURATION, PE_DIM_DURATION, PE_BRIGHTNESS_THRESHOLD } from "./constants.js";
+import {
+  CELL_SIZE,
+  PE_COLOR_IDLE, PE_COLOR_EXEC, PE_COLOR_FP_ARITH, PE_COLOR_INT_ARITH, PE_COLOR_CTRL, PE_COLOR_TASK,
+  PE_COLOR_STALL_WAVELET, PE_COLOR_STALL_PIPE,
+  PE_STALL_TEXT_WAVELET, PE_STALL_TEXT_PIPE, PE_SELECT_COLOR,
+  PE_TEXT_DEFAULT, PE_TEXT_DEFAULT_SUB, PE_TEXT_CTRL, PE_TEXT_CTRL_SUB, PE_TEXT_TASK, PE_TEXT_TASK_SUB,
+} from "./constants.js";
+import { DEMO_PE_ON_DURATION, DEMO_PE_BRIGHTEN_DURATION, DEMO_PE_DIM_DURATION } from "./demo.js";
 
+// Operation categories for PE color-coding:
+//   "fp-arith" = floating-point arithmetic (green)
+//   "int-arith" = integer arithmetic (yellow-green)
+//   undefined = everything else: comparisons, moves, loads, stores, DSR, control (blue)
 const SYMBOLIC_OPS = {
   // FP32 arithmetic
-  FADDS:  { symbol: "+", sub: "F32" },
-  FADDE:  { symbol: "+", sub: "F32" },
-  FMULS:  { symbol: "\u00d7", sub: "F32" },
-  FSUBS:  { symbol: "\u2212", sub: "F32" },
-  FMACS:  { symbol: "\u00d7+", sub: "F32" },
-  FMSS:   { symbol: "\u00d7\u2212", sub: "F32" },
-  FMSES:  { symbol: "\u00d7\u2212", sub: "F32" },
-  FDPS:   { symbol: "\u22c5", sub: "F32" },
+  FADDS:  { symbol: "+", sub: "F32", cat: "fp-arith" },
+  FADDE:  { symbol: "+", sub: "F32", cat: "fp-arith" },
+  FMULS:  { symbol: "\u00d7", sub: "F32", cat: "fp-arith" },
+  FSUBS:  { symbol: "\u2212", sub: "F32", cat: "fp-arith" },
+  FMACS:  { symbol: "\u00d7+", sub: "F32", cat: "fp-arith" },
+  FMSS:   { symbol: "\u00d7\u2212", sub: "F32", cat: "fp-arith" },
+  FMSES:  { symbol: "\u00d7\u2212", sub: "F32", cat: "fp-arith" },
+  FDPS:   { symbol: "\u22c5", sub: "F32", cat: "fp-arith" },
   FMOV32: { symbol: "MOV", sub: "F32" },
   FMOVS:  { symbol: "MOV", sub: "F32" },
   FSTDPAS:{ symbol: "ST", sub: "F32" },
   FSTDPAE:{ symbol: "ST", sub: "F32" },
   FSTDPAH:{ symbol: "ST", sub: "F16" },
-  FABSS:  { symbol: "ABS", sub: "F32" },
-  FNEGS:  { symbol: "\u2212", sub: "F32" },
-  FMAXS:  { symbol: "MAX", sub: "F32" },
-  FMINS:  { symbol: "MIN", sub: "F32" },
-  FEQS:   { symbol: "=", sub: "F32" },
-  FEQUS:  { symbol: "=", sub: "F32" },
-  FLTS:   { symbol: "<", sub: "F32" },
-  FLTUS:  { symbol: "<", sub: "F32" },
-  FLTEQS: { symbol: "\u2264", sub: "F32" },
-  FLTEQUS:{ symbol: "\u2264", sub: "F32" },
-  FMULE:  { symbol: "\u00d7", sub: "F32" },
-  FSUBE:  { symbol: "\u2212", sub: "F32" },
-  FMACE:  { symbol: "\u00d7+", sub: "F32" },
-  FMACES: { symbol: "\u00d7+", sub: "F32" },
-  FMSE:   { symbol: "\u00d7\u2212", sub: "F32" },
-  FDPE:   { symbol: "\u22c5", sub: "F32" },
+  FCPSS:  { symbol: "CPS", sub: "F32", cat: "fp-arith" },
+  FABSS:  { symbol: "ABS", sub: "F32", cat: "fp-arith" },
+  FNEGS:  { symbol: "\u2212", sub: "F32", cat: "fp-arith" },
+  FMAXS:  { symbol: "MAX", sub: "F32", cat: "fp-arith" },
+  FMINS:  { symbol: "MIN", sub: "F32", cat: "fp-arith" },
+  FEQS:   { symbol: "=", sub: "F32", cat: "ctrl" },
+  FEQUS:  { symbol: "=", sub: "F32", cat: "ctrl" },
+  FLTS:   { symbol: "<", sub: "F32", cat: "ctrl" },
+  FLTUS:  { symbol: "<", sub: "F32", cat: "ctrl" },
+  FLTEQS: { symbol: "\u2264", sub: "F32", cat: "ctrl" },
+  FLTEQUS:{ symbol: "\u2264", sub: "F32", cat: "ctrl" },
+  FMULE:  { symbol: "\u00d7", sub: "F32", cat: "fp-arith" },
+  FSUBE:  { symbol: "\u2212", sub: "F32", cat: "fp-arith" },
+  FMACE:  { symbol: "\u00d7+", sub: "F32", cat: "fp-arith" },
+  FMACES: { symbol: "\u00d7+", sub: "F32", cat: "fp-arith" },
+  FMSE:   { symbol: "\u00d7\u2212", sub: "F32", cat: "fp-arith" },
+  FDPE:   { symbol: "\u22c5", sub: "F32", cat: "fp-arith" },
+  FSQRS:  { symbol: "\u00d7", sub: "F32", cat: "fp-arith" },
+  FSQRE:  { symbol: "\u00d7", sub: "F32", cat: "fp-arith" },
+  FSSQRS: { symbol: "\u22c5", sub: "F32", cat: "fp-arith" },
+  FSSQRE: { symbol: "\u22c5", sub: "F32", cat: "fp-arith" },
+  FDIVSS: { symbol: "\u00f7", sub: "F32", cat: "fp-arith" },
+  FADDHS: { symbol: "+", sub: "F16\u2192F32", cat: "fp-arith" },
+  FADDSH: { symbol: "+", sub: "F32\u2192F16", cat: "fp-arith" },
   // FP16 arithmetic
-  FADDH:  { symbol: "+", sub: "F16" },
-  FMULH:  { symbol: "\u00d7", sub: "F16" },
-  FSUBH:  { symbol: "\u2212", sub: "F16" },
-  FMACH:  { symbol: "\u00d7+", sub: "F16" },
-  FMACHS: { symbol: "\u00d7+", sub: "F16" },
-  FMSH:   { symbol: "\u00d7\u2212", sub: "F16" },
-  FMSHS:  { symbol: "\u00d7\u2212", sub: "F16" },
-  FDPH:   { symbol: "\u22c5", sub: "F16" },
+  FADDH:  { symbol: "+", sub: "F16", cat: "fp-arith" },
+  FMULH:  { symbol: "\u00d7", sub: "F16", cat: "fp-arith" },
+  FSUBH:  { symbol: "\u2212", sub: "F16", cat: "fp-arith" },
+  FMACH:  { symbol: "\u00d7+", sub: "F16", cat: "fp-arith" },
+  FMACHS: { symbol: "\u00d7+", sub: "F16", cat: "fp-arith" },
+  FMSH:   { symbol: "\u00d7\u2212", sub: "F16", cat: "fp-arith" },
+  FMSHS:  { symbol: "\u00d7\u2212", sub: "F16", cat: "fp-arith" },
+  FDPH:   { symbol: "\u22c5", sub: "F16", cat: "fp-arith" },
+  FSQRH:  { symbol: "\u00d7", sub: "F16", cat: "fp-arith" },
+  FSSQRH: { symbol: "\u22c5", sub: "F16", cat: "fp-arith" },
+  FDIVSH: { symbol: "\u00f7", sub: "F16", cat: "fp-arith" },
   FMOV16: { symbol: "MOV", sub: "F16" },
   FMOVH:  { symbol: "MOV", sub: "F16" },
-  FABSH:  { symbol: "ABS", sub: "F16" },
-  FNEGH:  { symbol: "\u2212", sub: "F16" },
-  FMAXH:  { symbol: "MAX", sub: "F16" },
-  FMINH:  { symbol: "MIN", sub: "F16" },
-  FEQH:   { symbol: "=", sub: "F16" },
-  FEQUH:  { symbol: "=", sub: "F16" },
-  FLTH:   { symbol: "<", sub: "F16" },
-  FLTUH:  { symbol: "<", sub: "F16" },
-  FLTEQH: { symbol: "\u2264", sub: "F16" },
-  FLTEQUH:{ symbol: "\u2264", sub: "F16" },
+  FCPSH:  { symbol: "CPS", sub: "F16", cat: "fp-arith" },
+  FABSH:  { symbol: "ABS", sub: "F16", cat: "fp-arith" },
+  FNEGH:  { symbol: "\u2212", sub: "F16", cat: "fp-arith" },
+  FMAXH:  { symbol: "MAX", sub: "F16", cat: "fp-arith" },
+  FMINH:  { symbol: "MIN", sub: "F16", cat: "fp-arith" },
+  FEQH:   { symbol: "=", sub: "F16", cat: "ctrl" },
+  FEQUH:  { symbol: "=", sub: "F16", cat: "ctrl" },
+  FLTH:   { symbol: "<", sub: "F16", cat: "ctrl" },
+  FLTUH:  { symbol: "<", sub: "F16", cat: "ctrl" },
+  FLTEQH: { symbol: "\u2264", sub: "F16", cat: "ctrl" },
+  FLTEQUH:{ symbol: "\u2264", sub: "F16", cat: "ctrl" },
+  // FP/int/fixed-point conversion
+  FH2S:   { symbol: "CVT", sub: "F16\u2192F32" },
+  FS2H:   { symbol: "CVT", sub: "F32\u2192F16" },
+  XP162FH:{ symbol: "CVT", sub: "I16\u2192F16" },
+  XP162FS:{ symbol: "CVT", sub: "I16\u2192F32" },
+  XPX162FH:{ symbol: "CVT", sub: "X16\u2192F16" },
+  XPX162FS:{ symbol: "CVT", sub: "X16\u2192F32" },
+  FH2XP16:{ symbol: "CVT", sub: "F16\u2192I16" },
+  FS2XP16:{ symbol: "CVT", sub: "F32\u2192I16" },
+  FH2XPX16:{ symbol: "CVT", sub: "F16\u2192X16" },
+  FS2XPX16:{ symbol: "CVT", sub: "F32\u2192X16" },
+  XP322FS:{ symbol: "CVT", sub: "I32\u2192F32" },
+  FS2XP32:{ symbol: "CVT", sub: "F32\u2192I32" },
+  XP162XP8:{ symbol: "CVT", sub: "X16\u2192X8" },
+  XP162XP8D:{ symbol: "CVT", sub: "X16\u2192X8" },
   // INT16 arithmetic
-  ADD16:  { symbol: "+", sub: "I16" },
-  SUB16:  { symbol: "\u2212", sub: "I16" },
-  NEG16:  { symbol: "\u2212", sub: "I16" },
-  IMUL16: { symbol: "\u00d7", sub: "I16" },
-  SLL16:  { symbol: "\u00ab", sub: "I16" },
-  SLR16:  { symbol: "\u00bb", sub: "I16" },
-  SAR16:  { symbol: "\u00bb", sub: "I16" },
+  ADD16:  { symbol: "+", sub: "I16", cat: "int-arith" },
+  SUB16:  { symbol: "\u2212", sub: "I16", cat: "int-arith" },
+  NEG16:  { symbol: "\u2212", sub: "I16", cat: "int-arith" },
+  IMUL16: { symbol: "\u00d7", sub: "I16", cat: "int-arith" },
+  IMUL11: { symbol: "\u00d7", sub: "I11", cat: "int-arith" },
+  IMUL16UD:{ symbol: "\u00d7", sub: "I16\u2192I32", cat: "int-arith" },
+  IMUL16SD:{ symbol: "\u00d7", sub: "I16\u2192I32", cat: "int-arith" },
+  IADD16: { symbol: "+", sub: "I16\u2192I32", cat: "int-arith" },
+  SLL16:  { symbol: "\u00ab", sub: "I16", cat: "int-arith" },
+  SLR16:  { symbol: "\u00bb", sub: "I16", cat: "int-arith" },
+  SAR16:  { symbol: "\u00bb", sub: "I16", cat: "int-arith" },
+  XOR16:  { symbol: "\u2295", sub: "I16" },
   AND16:  { symbol: "&", sub: "I16" },
   ANDN16: { symbol: "&~", sub: "I16" },
   OR16:   { symbol: "|", sub: "I16" },
   NOT16:  { symbol: "~", sub: "I16" },
   IMOV16: { symbol: "MOV", sub: "I16" },
-  EQ16:   { symbol: "=", sub: "I16" },
-  LT16:   { symbol: "<", sub: "I16" },
-  LTE16:  { symbol: "\u2264", sub: "I16" },
-  ADDC16: { symbol: "+", sub: "I16" },
-  ADDSS16:{ symbol: "+", sub: "I16" },
-  ADDSU16:{ symbol: "+", sub: "I16" },
-  SUBC16: { symbol: "\u2212", sub: "I16" },
-  SUBSS16:{ symbol: "\u2212", sub: "I16" },
-  SUBSU16:{ symbol: "\u2212", sub: "I16" },
-  LTU16:  { symbol: "<", sub: "I16" },
-  LTEU16: { symbol: "\u2264", sub: "I16" },
+  EQ16:   { symbol: "=", sub: "I16", cat: "ctrl" },
+  LT16:   { symbol: "<", sub: "I16", cat: "ctrl" },
+  LTE16:  { symbol: "\u2264", sub: "I16", cat: "ctrl" },
+  ADDC16: { symbol: "+", sub: "I16", cat: "int-arith" },
+  ADDSS16:{ symbol: "+", sub: "I16", cat: "int-arith" },
+  ADDSU16:{ symbol: "+", sub: "I16", cat: "int-arith" },
+  SUBC16: { symbol: "\u2212", sub: "I16", cat: "int-arith" },
+  SUBSS16:{ symbol: "\u2212", sub: "I16", cat: "int-arith" },
+  SUBSU16:{ symbol: "\u2212", sub: "I16", cat: "int-arith" },
+  LTU16:  { symbol: "<", sub: "I16", cat: "ctrl" },
+  LTEU16: { symbol: "\u2264", sub: "I16", cat: "ctrl" },
   // INT32 arithmetic
-  ADD32:  { symbol: "+", sub: "I32" },
-  SUB32:  { symbol: "\u2212", sub: "I32" },
-  NEG32:  { symbol: "\u2212", sub: "I32" },
+  ADD32:  { symbol: "+", sub: "I32", cat: "int-arith" },
+  SUB32:  { symbol: "\u2212", sub: "I32", cat: "int-arith" },
+  NEG32:  { symbol: "\u2212", sub: "I32", cat: "int-arith" },
+  XOR32:  { symbol: "\u2295", sub: "I32" },
   AND32:  { symbol: "&", sub: "I32" },
   ANDN32: { symbol: "&~", sub: "I32" },
   OR32:   { symbol: "|", sub: "I32" },
   NOT32:  { symbol: "~", sub: "I32" },
   IMOV32: { symbol: "MOV", sub: "I32" },
-  EQ32:   { symbol: "=", sub: "I32" },
-  LT32:   { symbol: "<", sub: "I32" },
-  LTE32:  { symbol: "\u2264", sub: "I32" },
-  ADDC32: { symbol: "+", sub: "I32" },
-  SUBC32: { symbol: "\u2212", sub: "I32" },
-  LTU32:  { symbol: "<", sub: "I32" },
-  LTEU32: { symbol: "\u2264", sub: "I32" },
+  EQ32:   { symbol: "=", sub: "I32", cat: "ctrl" },
+  LT32:   { symbol: "<", sub: "I32", cat: "ctrl" },
+  LTE32:  { symbol: "\u2264", sub: "I32", cat: "ctrl" },
+  ADDC32: { symbol: "+", sub: "I32", cat: "int-arith" },
+  SUBC32: { symbol: "\u2212", sub: "I32", cat: "int-arith" },
+  LTU32:  { symbol: "<", sub: "I32", cat: "ctrl" },
+  LTEU32: { symbol: "\u2264", sub: "I32", cat: "ctrl" },
+  // 8-bit fixed-point arithmetic
+  XADD8:  { symbol: "+", sub: "X8" },
+  XSUB8:  { symbol: "\u2212", sub: "X8" },
+  XMUL8:  { symbol: "\u00d7", sub: "X8" },
+  XDP8:   { symbol: "\u22c5", sub: "X8" },
+  XSQR8:  { symbol: "\u00d7", sub: "X8" },
+  XSSQR8: { symbol: "\u22c5", sub: "X8" },
+  XADD816:{ symbol: "+", sub: "X8\u2192X16" },
   // Bit counting
-  CLZ:    { symbol: "CLZ" },
-  CTZ:    { symbol: "CTZ" },
+  CLZ16:  { symbol: "CLZ" },
+  CTZ16:  { symbol: "CTZ" },
+  POPCNT16:{ symbol: "POPCNT" },
+  SXTD16: { symbol: "SXTD", sub: "I16\u2192I32" },
   // Move (untyped)
   MOV16:  { symbol: "MOV", sub: "16" },
   MOV32:  { symbol: "MOV", sub: "32" },
-  JMP:    { symbol: "JMP" },
+  MOVO16: { symbol: "MOV", sub: "16" },
+  MOVO32: { symbol: "MOV", sub: "32" },
+  UMOV16: { symbol: "MOV", sub: "16" },
+  UMOV32: { symbol: "MOV", sub: "32" },
+  JMP:    { symbol: "JMP", cat: "ctrl" },
   LDCFG32:{ symbol: "LD", sub: "CFG" },
   LD16:   { symbol: "LD", sub: "16" },
   LD16RP: { symbol: "LD", sub: "32" },
   LD32:   { symbol: "LD", sub: "32" },
   LD16RQ: { symbol: "LD", sub: "64" },
+  LD64:   { symbol: "LD", sub: "64" },
   LDR16P: { symbol: "LD", sub: "32" },
   LDDDS:  { symbol: "DSR", sub: "LD D" },
   LDDWDS: { symbol: "DSR", sub: "LD D" },
@@ -131,19 +190,62 @@ const SYMBOLIC_OPS = {
   STCFG32:{ symbol: "ST", sub: "CFG" },
   ST16:   { symbol: "ST", sub: "16" },
   ST32:   { symbol: "ST", sub: "32" },
+  // Task management
+  ACTVT:  { symbol: "ACTVT", cat: "task" },
+  BLK:    { symbol: "BLK", cat: "task" },
+  UBLK:   { symbol: "UBLK", cat: "task" },
+  YIELD:  { symbol: "YIELD", cat: "task" },
+  YIELDH: { symbol: "YIELDH", cat: "task" },
+  JMPT:   { symbol: "JMPT", cat: "task" },
 };
 
+// Pre-compute isText (symbol starts with uppercase letter) on each entry.
+// This avoids a regex test per PE per frame in draw().
+for (const entry of Object.values(SYMBOLIC_OPS)) {
+  entry.isText = /^[A-Z]/.test(entry.symbol);
+  entry.textColor = entry.cat === "task" ? PE_TEXT_TASK
+    : entry.cat === "ctrl" ? PE_TEXT_CTRL : PE_TEXT_DEFAULT;
+  entry.subColor = entry.cat === "task" ? PE_TEXT_TASK_SUB
+    : entry.cat === "ctrl" ? PE_TEXT_CTRL_SUB : PE_TEXT_DEFAULT_SUB;
+}
+
+// Font constants derived from CELL_SIZE — identical for every PE, so computed
+// once at module level instead of per-instance.
+const FONT_SIZE_MAX_LABEL = CELL_SIZE * 0.25;
+const FONT_SIZE_SCALE_LABEL = CELL_SIZE * 1.2;
+const FONT_BOLD_TEXT = `bold ${CELL_SIZE * 0.32}px sans-serif`;
+const FONT_BOLD_MATH = `bold ${CELL_SIZE * 0.55}px sans-serif`;
+const FONT_SUB = `${CELL_SIZE * 0.2}px sans-serif`;
+
+// Build a pre-computed lookup table from interned opcode IDs to SYMBOLIC_OPS entries.
+// Called once at load time so that setBusy/draw never need to split strings or
+// hash-lookup SYMBOLIC_OPS.
+export function buildOpEntryLookup(opLookup) {
+  const table = new Array(opLookup.length);
+  for (let i = 0; i < opLookup.length; i++) {
+    const op = opLookup[i];
+    if (op) {
+      const baseOp = op.includes(".") ? op.substring(0, op.indexOf(".")) : op;
+      table[i] = SYMBOLIC_OPS[baseOp] || null;
+    } else {
+      table[i] = null;
+    }
+  }
+  return table;
+}
+
 export class PE {
-  constructor(x, y, size) {
+  constructor(x, y) {
     this.x = x;
     this.y = y;
-    this.size = size;
+    // Pre-computed layout constants (never change after construction)
+    this.cx = x + CELL_SIZE / 2;
+    this.cy = y + CELL_SIZE / 2;
     this.brightness = 0;
     this.targetBrightness = 0;
     this.transitionStartTime = 0;
     this.transitionDuration = 0;
     this.startBrightness = 0;
-    this.onDuration = PE_ON_DURATION;
     this.activationTime = 0;
     this.active = false;
     this.op = null;
@@ -161,14 +263,15 @@ export class PE {
     this.stallReason = null; // compact label: "C6", "A0", "R3", "MEM", "S1DS0"
   }
 
-  setBusy(busy, op, stall) {
+  setBusy(busy, op, opEntry) {
     const isNop = op === "NOP" || (op && op.startsWith("NOP."));
-    this.brightness = (busy && !isNop) ? 1 : (stall ? 0.25 : 0);
+    this.brightness = (busy && !isNop) ? 1 : 0;
     this.targetBrightness = this.brightness;
     this.transitionDuration = 0;
     this.active = false;
     this.op = isNop ? null : (op || null);
-    this.stall = stall || null;
+    this.opEntry = opEntry || null;
+    this.stall = null;
     this.stallReason = null;
   }
 
@@ -179,16 +282,16 @@ export class PE {
     this.startBrightness = this.brightness;
     this.targetBrightness = 1;
     this.transitionStartTime = now;
-    this.transitionDuration = PE_BRIGHTEN_DURATION;
+    this.transitionDuration = DEMO_PE_BRIGHTEN_DURATION;
   }
 
   update(now) {
-    if (this.active && now - this.activationTime > this.onDuration) {
+    if (this.active && now - this.activationTime > DEMO_PE_ON_DURATION) {
       this.active = false;
       this.startBrightness = this.brightness;
       this.targetBrightness = 0;
       this.transitionStartTime = now;
-      this.transitionDuration = PE_DIM_DURATION;
+      this.transitionDuration = DEMO_PE_DIM_DURATION;
     }
 
     if (this.transitionDuration > 0) {
@@ -205,76 +308,70 @@ export class PE {
   }
 
   draw(ctx) {
-    const b = this.brightness;
-    const baseAlpha = 0.3 + b * 0.7;
+    const entry = this.opEntry;
+    const cat = entry ? entry.cat : null;
 
     // Stall colors only render when nothing is executing (!this.op).
     // See the execution/stall model comment in the constructor.
     if (this.stall === "wavelet" && !this.op) {
-      ctx.fillStyle = `rgba(${55 + b * 75}, ${20 + b * 20}, ${70 + b * 110}, ${baseAlpha})`;
+      ctx.fillStyle = PE_COLOR_STALL_WAVELET;
     } else if (this.stall && !this.op) {
-      ctx.fillStyle = `rgba(${70 + b * 100}, ${30 + b * 30}, ${20 + b * 20}, ${baseAlpha})`;
+      ctx.fillStyle = PE_COLOR_STALL_PIPE;
+    } else if (cat === "fp-arith") {
+      ctx.fillStyle = PE_COLOR_FP_ARITH;
+    } else if (cat === "int-arith") {
+      ctx.fillStyle = PE_COLOR_INT_ARITH;
+    } else if (cat === "ctrl") {
+      ctx.fillStyle = PE_COLOR_CTRL;
+    } else if (cat === "task") {
+      ctx.fillStyle = PE_COLOR_TASK;
     } else {
-      // Normal: executing (bright blue) or idle (dark blue)
-      ctx.fillStyle = `rgba(${45 + b * 55}, ${58 + b * 123}, ${90 + b * 156}, ${baseAlpha})`;
+      ctx.fillStyle = this.brightness > 0.5 ? PE_COLOR_EXEC : PE_COLOR_IDLE;
     }
-    ctx.fillRect(this.x, this.y, this.size, this.size);
+    ctx.fillRect(this.x, this.y, CELL_SIZE, CELL_SIZE);
 
     if (this.selected) {
-      ctx.strokeStyle = "#ff9800";
+      ctx.strokeStyle = PE_SELECT_COLOR;
       ctx.lineWidth = 2;
-      ctx.strokeRect(this.x, this.y, this.size, this.size);
+      ctx.strokeRect(this.x, this.y, CELL_SIZE, CELL_SIZE);
     }
 
     if (!this.op && this.stallReason) {
-      const cx = this.x + this.size / 2;
-      const cy = this.y + this.size / 2;
-      const fontSize = Math.min(this.size * 0.25, (this.size * 1.2) / this.stallReason.length);
+      const fontSize = Math.min(FONT_SIZE_MAX_LABEL, FONT_SIZE_SCALE_LABEL / this.stallReason.length);
       ctx.font = `${fontSize}px monospace`;
-      ctx.fillStyle = this.stall === "wavelet"
-        ? "rgba(200, 180, 220, 0.7)"   // lavender for wavelet stalls
-        : "rgba(230, 200, 150, 0.7)";  // light orange for pipeline stalls
+      ctx.fillStyle = this.stall === "wavelet" ? PE_STALL_TEXT_WAVELET : PE_STALL_TEXT_PIPE;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(this.stallReason, cx, cy);
+      ctx.fillText(this.stallReason, this.cx, this.cy);
       return;
     }
 
-    if (b <= PE_BRIGHTNESS_THRESHOLD) return;
-
     if (!this.op) return;
 
-    const cx = this.x + this.size / 2;
-    const cy = this.y + this.size / 2;
-    ctx.fillStyle = `rgba(255, 255, 255, ${b})`;
+    ctx.fillStyle = entry ? entry.textColor : PE_TEXT_DEFAULT;
     ctx.textAlign = "center";
 
-    const baseOp = this.op.split(".")[0];
-    const entry = SYMBOLIC_OPS[baseOp];
     if (entry) {
-      const isText = /^[A-Z]/.test(entry.symbol);
       if (entry.sub) {
-        const symbolSize = isText ? this.size * 0.32 : this.size * 0.55;
-        ctx.font = `bold ${symbolSize}px sans-serif`;
+        ctx.font = entry.isText ? FONT_BOLD_TEXT : FONT_BOLD_MATH;
         ctx.textBaseline = "alphabetic";
-        ctx.fillText(entry.symbol, cx, cy + this.size * 0.05);
+        ctx.fillText(entry.symbol, this.cx, this.cy + CELL_SIZE * 0.05);
 
-        ctx.font = `${this.size * 0.2}px sans-serif`;
-        ctx.fillStyle = `rgba(255, 255, 255, ${b * 0.85})`;
+        ctx.font = FONT_SUB;
+        ctx.fillStyle = entry.subColor;
         ctx.textBaseline = "top";
-        ctx.fillText(entry.sub, cx, cy + this.size * 0.1);
+        ctx.fillText(entry.sub, this.cx, this.cy + CELL_SIZE * 0.1);
       } else {
-        const symbolSize = isText ? this.size * 0.32 : this.size * 0.55;
-        ctx.font = `bold ${symbolSize}px sans-serif`;
+        ctx.font = entry.isText ? FONT_BOLD_TEXT : FONT_BOLD_MATH;
         ctx.textBaseline = "middle";
-        ctx.fillText(entry.symbol, cx, cy);
+        ctx.fillText(entry.symbol, this.cx, this.cy);
       }
     } else {
-      const fontSize = Math.min(this.size * 0.25, (this.size * 1.2) / this.op.length);
+      const fontSize = Math.min(FONT_SIZE_MAX_LABEL, FONT_SIZE_SCALE_LABEL / this.op.length);
       ctx.font = `${fontSize}px sans-serif`;
-      ctx.fillStyle = `rgba(255, 255, 255, ${b * 0.85})`;
+      ctx.fillStyle = PE_TEXT_DEFAULT_SUB;
       ctx.textBaseline = "middle";
-      ctx.fillText(this.op, cx, cy);
+      ctx.fillText(this.op, this.cx, this.cy);
     }
   }
 }

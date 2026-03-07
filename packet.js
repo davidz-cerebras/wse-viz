@@ -1,4 +1,4 @@
-import { HOP_DELAY } from "./constants.js";
+import { DEMO_HOP_DELAY } from "./demo.js";
 import { drawPacketDot } from "./draw-utils.js";
 
 export class DataPacket {
@@ -8,7 +8,7 @@ export class DataPacket {
     this.toX = toX;
     this.toY = toY;
     this.startTime = startTime !== undefined ? startTime : performance.now();
-    this.duration = duration !== undefined ? duration : HOP_DELAY;
+    this.duration = duration !== undefined ? duration : DEMO_HOP_DELAY;
   }
 
   getCurrentPosition(currentTime) {

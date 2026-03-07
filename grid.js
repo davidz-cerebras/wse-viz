@@ -1,28 +1,27 @@
 import { PE } from "./pe.js";
 import { DataPacket } from "./packet.js";
-import { CELL_SIZE, RAMP_ARROW_DEPTH, RAMP_ARROW_LATERAL, RAMP_ARROW_SIZE } from "./constants.js";
+import {
+  CELL_SIZE, GAP_SIZE, ARROW_DEPTH, RAMP_LATERAL, ARROW_SIZE,
+  ZOOM_PREVIEW_COLOR, CORNER_LABEL_COLOR,
+  RAMP_ON_ACTIVE, RAMP_ON_INACTIVE, RAMP_OFF_ACTIVE, RAMP_OFF_INACTIVE,
+} from "./constants.js";
 
 export class Grid {
-  constructor(rows, cols, cellSize, gap) {
+  constructor(rows, cols) {
     this.rows = rows;
     this.cols = cols;
-    this.cellSize = cellSize;
-    this.gap = gap;
     this.pes = [];
     this.packets = [];
     this.cancelled = false;
     this.pendingTimers = new Set();
     this.viewport = null; // { minRow, maxRow, minCol, maxCol } or null for full grid
     this.zoomPreview = null; // { minRow, maxRow, minCol, maxCol } — highlight during drag
-    this.centerCol1 = Math.floor((cols - 1) / 2);
-    this.centerCol2 = cols % 2 === 0 ? this.centerCol1 + 1 : this.centerCol1;
-    this.centerRow1 = Math.floor((rows - 1) / 2);
-    this.centerRow2 = rows % 2 === 0 ? this.centerRow1 + 1 : this.centerRow1;
+    this._activeRamps = null; // cached Uint8Array for _collectActiveRamps
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
-        const x = col * (cellSize + gap) + gap;
-        const y = row * (cellSize + gap) + gap;
-        this.pes.push(new PE(x, y, cellSize));
+        const x = col * (CELL_SIZE + GAP_SIZE) + GAP_SIZE;
+        const y = row * (CELL_SIZE + GAP_SIZE) + GAP_SIZE;
+        this.pes.push(new PE(x, y));
       }
     }
   }
@@ -42,21 +41,21 @@ export class Grid {
 
   // Returns the natural (logical) pixel size of the current viewport region.
   getViewportNaturalSize() {
-    const step = this.cellSize + this.gap;
+    const step = CELL_SIZE + GAP_SIZE;
     if (!this.viewport) {
-      return { width: this.cols * step + this.gap, height: this.rows * step + this.gap };
+      return { width: this.cols * step + GAP_SIZE, height: this.rows * step + GAP_SIZE };
     }
     const v = this.viewport;
     return {
-      width: (v.maxCol - v.minCol + 1) * step + this.gap,
-      height: (v.maxRow - v.minRow + 1) * step + this.gap,
+      width: (v.maxCol - v.minCol + 1) * step + GAP_SIZE,
+      height: (v.maxRow - v.minRow + 1) * step + GAP_SIZE,
     };
   }
 
   // Returns the logical pixel offset of the viewport origin.
   getViewportOffset() {
     if (!this.viewport) return { x: 0, y: 0 };
-    const step = this.cellSize + this.gap;
+    const step = CELL_SIZE + GAP_SIZE;
     return { x: this.viewport.minCol * step, y: this.viewport.minRow * step };
   }
 
@@ -95,9 +94,9 @@ export class Grid {
     for (const pe of this.pes) pe.activate();
   }
 
-  setPEBusy(row, col, busy, op, stall) {
+  setPEBusy(row, col, busy, op, opEntry) {
     const pe = this.getPE(row, col);
-    if (pe) pe.setBusy(busy, op, stall);
+    if (pe) pe.setBusy(busy, op, opEntry);
   }
 
   setPEStall(row, col, stall, reason) {
@@ -107,10 +106,6 @@ export class Grid {
       pe.stallReason = reason || null;
       if (stall) pe.brightness = Math.max(pe.brightness, 0.25);
     }
-  }
-
-  resetAllPEs() {
-    for (const pe of this.pes) pe.setBusy(false, null, null);
   }
 
   selectPE(row, col) {
@@ -132,7 +127,7 @@ export class Grid {
     const toPE = this.getPE(toRow, toCol);
     if (!fromPE || !toPE) return;
 
-    const half = this.cellSize / 2;
+    const half = CELL_SIZE / 2;
     this.packets.push(
       new DataPacket(
         fromPE.x + half, fromPE.y + half,
@@ -172,104 +167,102 @@ export class Grid {
     // Draw zoom preview: tint each selected PE during Shift+drag
     if (this.zoomPreview) {
       const zp = this.zoomPreview;
-      ctx.fillStyle = "rgba(255, 152, 0, 0.3)";
+      ctx.fillStyle = ZOOM_PREVIEW_COLOR;
       for (let row = zp.minRow; row <= zp.maxRow; row++) {
         for (let col = zp.minCol; col <= zp.maxCol; col++) {
           const pe = this.getPE(row, col);
-          if (pe) ctx.fillRect(pe.x, pe.y, this.cellSize, this.cellSize);
+          if (pe) ctx.fillRect(pe.x, pe.y, CELL_SIZE, CELL_SIZE);
         }
       }
     }
   }
 
   drawRamps(ctx, minR, maxR, minC, maxC) {
-    const depth = RAMP_ARROW_DEPTH;
-    const lat = RAMP_ARROW_LATERAL;
-    const arrowSize = RAMP_ARROW_SIZE;
-
     // Collect active ramps from TracedPackets
     const activeRamps = this._collectActiveRamps();
 
+    // activeRamps is a Uint8Array indexed by peIndex*8 + dirIdx*2 + isOn
+    // dirIdx: E=0, N=1, W=2, S=3; isOn: 0=off, 1=on
     for (let row = minR; row <= maxR; row++) {
       for (let col = minC; col <= maxC; col++) {
         const pe = this.getPE(row, col);
         if (!pe) continue;
-        const cx = pe.x + CELL_SIZE / 2;
-        const cy = pe.y + CELL_SIZE / 2;
-        const key = row * this.cols + col;
+        const { cx, cy } = pe;
+        const base = (row * this.cols + col) * 8;
 
-        // Each direction has an on-ramp (arriving) and off-ramp (departing)
-        // Off-ramp arrow points away from PE; on-ramp arrow points toward PE
+        // E side (screen right): dirIdx=0
+        this._drawRamp(ctx, cx + ARROW_DEPTH, cy - RAMP_LATERAL, "E", false, activeRamps[base]);
+        this._drawRamp(ctx, cx + ARROW_DEPTH, cy + RAMP_LATERAL, "E", true, activeRamps[base + 1]);
 
-        // E side (screen right)
-        this._drawRamp(ctx, cx + depth, cy - lat, arrowSize, "E", false, activeRamps.has(`${key},E,off`));
-        this._drawRamp(ctx, cx + depth, cy + lat, arrowSize, "E", true, activeRamps.has(`${key},E,on`));
+        // N side (screen down): dirIdx=1
+        this._drawRamp(ctx, cx - RAMP_LATERAL, cy + ARROW_DEPTH, "N", false, activeRamps[base + 2]);
+        this._drawRamp(ctx, cx + RAMP_LATERAL, cy + ARROW_DEPTH, "N", true, activeRamps[base + 3]);
 
-        // W side (screen left)
-        this._drawRamp(ctx, cx - depth, cy + lat, arrowSize, "W", false, activeRamps.has(`${key},W,off`));
-        this._drawRamp(ctx, cx - depth, cy - lat, arrowSize, "W", true, activeRamps.has(`${key},W,on`));
+        // W side (screen left): dirIdx=2
+        this._drawRamp(ctx, cx - ARROW_DEPTH, cy + RAMP_LATERAL, "W", false, activeRamps[base + 4]);
+        this._drawRamp(ctx, cx - ARROW_DEPTH, cy - RAMP_LATERAL, "W", true, activeRamps[base + 5]);
 
-        // N side (screen down — trace N = y-1 = lower on screen)
-        this._drawRamp(ctx, cx - lat, cy + depth, arrowSize, "N", false, activeRamps.has(`${key},N,off`));
-        this._drawRamp(ctx, cx + lat, cy + depth, arrowSize, "N", true, activeRamps.has(`${key},N,on`));
-
-        // S side (screen up — trace S = y+1 = higher on screen)
-        this._drawRamp(ctx, cx + lat, cy - depth, arrowSize, "S", false, activeRamps.has(`${key},S,off`));
-        this._drawRamp(ctx, cx - lat, cy - depth, arrowSize, "S", true, activeRamps.has(`${key},S,on`));
+        // S side (screen up): dirIdx=3
+        this._drawRamp(ctx, cx + RAMP_LATERAL, cy - ARROW_DEPTH, "S", false, activeRamps[base + 6]);
+        this._drawRamp(ctx, cx - RAMP_LATERAL, cy - ARROW_DEPTH, "S", true, activeRamps[base + 7]);
       }
     }
   }
 
-  _drawRamp(ctx, x, y, size, dir, isOnRamp, active) {
-    // Arrow pointing toward PE (on-ramp) or away from PE (off-ramp)
-    // Screen directions: E=right, W=left, N=down, S=up
-    const alpha = active ? 0.9 : 0.15;
+  _drawRamp(ctx, x, y, dir, isOnRamp, active) {
     ctx.fillStyle = isOnRamp
-      ? `rgba(100, 181, 246, ${alpha})`   // blue for on-ramp
-      : `rgba(255, 152, 0, ${alpha})`;     // orange for off-ramp
+      ? (active ? RAMP_ON_ACTIVE : RAMP_ON_INACTIVE)
+      : (active ? RAMP_OFF_ACTIVE : RAMP_OFF_INACTIVE);
 
-    // Arrow direction: on-ramp points inward (toward PE), off-ramp points outward
     let dx = 0, dy = 0;
     switch (dir) {
       case "E": dx = isOnRamp ? -1 : 1; break;
       case "W": dx = isOnRamp ? 1 : -1; break;
-      case "N": dy = isOnRamp ? -1 : 1; break; // N = screen down, inward = up (-Y)
-      case "S": dy = isOnRamp ? 1 : -1; break; // S = screen up, inward = down (+Y)
+      case "N": dy = isOnRamp ? -1 : 1; break;
+      case "S": dy = isOnRamp ? 1 : -1; break;
     }
 
-    // Draw a small triangle pointing in (dx, dy) direction
     ctx.beginPath();
     if (dx !== 0) {
-      // Horizontal arrow
-      ctx.moveTo(x + dx * size, y);
-      ctx.lineTo(x - dx * size, y - size);
-      ctx.lineTo(x - dx * size, y + size);
+      ctx.moveTo(x + dx * ARROW_SIZE, y);
+      ctx.lineTo(x - dx * ARROW_SIZE, y - ARROW_SIZE);
+      ctx.lineTo(x - dx * ARROW_SIZE, y + ARROW_SIZE);
     } else {
-      // Vertical arrow
-      ctx.moveTo(x, y + dy * size);
-      ctx.lineTo(x - size, y - dy * size);
-      ctx.lineTo(x + size, y - dy * size);
+      ctx.moveTo(x, y + dy * ARROW_SIZE);
+      ctx.lineTo(x - ARROW_SIZE, y - dy * ARROW_SIZE);
+      ctx.lineTo(x + ARROW_SIZE, y - dy * ARROW_SIZE);
     }
     ctx.closePath();
     ctx.fill();
   }
 
+  // Ramp direction encoding for the active ramps Uint8Array.
+  // Each PE has 8 slots: 4 directions × (off-ramp, on-ramp).
+  // Index = peIndex * 8 + dirIdx * 2 + isOn
+  static _dirIdx = { E: 0, N: 1, W: 2, S: 3 };
+
   _collectActiveRamps() {
-    // Returns a Set of "peKey,dir,on|off" strings for ramps currently in use
-    const active = new Set();
+    // Returns a Uint8Array where a nonzero value means the ramp is active.
+    // Indexed by (row*cols + col) * 8 + dirIdx * 2 + isOn.
+    const size = this.rows * this.cols * 8;
+    if (!this._activeRamps || this._activeRamps.length !== size) {
+      this._activeRamps = new Uint8Array(size);
+    }
+    const active = this._activeRamps;
+    active.fill(0);
+    const dirIdx = Grid._dirIdx;
     for (const pkt of this.packets) {
       if (!pkt.waypoints || !pkt.visible) continue;
 
       const wp = pkt.waypoints;
       const fc = pkt.fractionalCycle;
-      // Find current waypoint
-      let wpIdx = 0;
+      let wpI = 0;
       for (let i = 1; i < wp.length; i++) {
         if (wp[i].cycle > fc) break;
-        wpIdx = i;
+        wpI = i;
       }
 
-      const cur = wp[wpIdx];
+      const cur = wp[wpI];
       const depCycle = cur.depCycle;
       const row = pkt.dimY - 1 - cur.y;
       const col = cur.x;
@@ -277,25 +270,25 @@ export class Grid {
 
       if (depCycle !== null && fc < depCycle) {
         if (inBounds) {
-          const key = row * this.cols + col;
-          if (cur.arriveDir && cur.arriveDir !== "R") active.add(`${key},${cur.arriveDir},on`);
-          if (cur.departDir) active.add(`${key},${cur.departDir},off`);
+          const base = (row * this.cols + col) * 8;
+          if (cur.arriveDir && cur.arriveDir !== "R") active[base + dirIdx[cur.arriveDir] * 2 + 1] = 1;
+          if (cur.departDir) active[base + dirIdx[cur.departDir] * 2] = 1;
         }
-      } else if (depCycle !== null && wpIdx < wp.length - 1) {
+      } else if (depCycle !== null && wpI < wp.length - 1) {
         if (inBounds && cur.departDir) {
-          active.add(`${row * this.cols + col},${cur.departDir},off`);
+          active[(row * this.cols + col) * 8 + dirIdx[cur.departDir] * 2] = 1;
         }
-        const next = wp[wpIdx + 1];
-        const nextRow = pkt.dimY - 1 - next.y;
-        const nextCol = next.x;
-        if (nextRow >= 0 && nextRow < this.rows && nextCol >= 0 && nextCol < this.cols) {
+        const next = wp[wpI + 1];
+        const nRow = pkt.dimY - 1 - next.y;
+        const nCol = next.x;
+        if (nRow >= 0 && nRow < this.rows && nCol >= 0 && nCol < this.cols) {
           if (next.arriveDir && next.arriveDir !== "R") {
-            active.add(`${nextRow * this.cols + nextCol},${next.arriveDir},on`);
+            active[(nRow * this.cols + nCol) * 8 + dirIdx[next.arriveDir] * 2 + 1] = 1;
           }
         }
       } else {
         if (inBounds && cur.arriveDir && cur.arriveDir !== "R") {
-          active.add(`${row * this.cols + col},${cur.arriveDir},on`);
+          active[(row * this.cols + col) * 8 + dirIdx[cur.arriveDir] * 2 + 1] = 1;
         }
       }
     }
@@ -303,19 +296,19 @@ export class Grid {
   }
 
   _drawCornerLabels(ctx, minR, maxR, minC, maxC) {
-    const fontSize = Math.min(this.gap * 0.7, 6);
+    const fontSize = Math.min(GAP_SIZE * 0.7, 6);
     if (fontSize < 2) return; // too small to read
     ctx.font = `${fontSize}px sans-serif`;
-    ctx.fillStyle = "rgba(180, 190, 210, 0.6)";
+    ctx.fillStyle = CORNER_LABEL_COLOR;
 
-    const step = this.cellSize + this.gap;
-    const g = this.gap;
+    const step = CELL_SIZE + GAP_SIZE;
+    const g = GAP_SIZE;
     // Position labels in the margin outside the PE bounding box.
     // The viewport includes a gap-width margin on all sides.
     const left = minC * step + g / 2;
-    const right = maxC * step + g + this.cellSize + g / 2;
+    const right = maxC * step + g + CELL_SIZE + g / 2;
     const top = minR * step + g / 2;
-    const bottom = maxR * step + g + this.cellSize + g / 2;
+    const bottom = maxR * step + g + CELL_SIZE + g / 2;
 
     const corners = [
       [minR, minC, left,  top,    "left",  "top"],
