@@ -49,8 +49,7 @@ header {
 header h1 {
   font-size: 1.5rem;
   font-weight: 600;
-  color: var(--color-accent);
-  background: linear-gradient(90deg, #64b5f6, #42a5f5);
+  background: linear-gradient(90deg, var(--color-accent), #42a5f5);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -98,7 +97,6 @@ header h1 {
 
 .file-input-label {
   background: linear-gradient(135deg, var(--color-highlight), #f57c00);
-  display: inline-block;
 }
 
 .file-input-label:hover {
@@ -322,7 +320,6 @@ canvas {
 
 .trace-cycle {
   color: var(--color-text-muted);
-  display: inline-block;
   min-width: 45px;
   text-align: right;
 }
@@ -356,8 +353,8 @@ canvas {
 }
 
 .trace-entry.current {
-  background: rgba(255, 152, 0, 0.25);
-  border-left: 3px solid var(--color-highlight);
+  background: color-mix(in srgb, var(--color-highlight) 25%, transparent);
+  border-left-color: var(--color-highlight);
 }
 
 .panel-resizer {
@@ -411,7 +408,7 @@ canvas {
 }
 
 .op-chart-row.active {
-  background: rgba(255, 152, 0, 0.25);
+  background: color-mix(in srgb, var(--color-highlight) 25%, transparent);
 }
 
 .op-chart-label {
@@ -472,7 +469,7 @@ canvas {
 }
 
 .code-line.active {
-  background: rgba(100, 181, 246, 0.2);
+  background: color-mix(in srgb, var(--color-accent) 20%, transparent);
   border-left-color: var(--color-accent);
 }
 
@@ -535,7 +532,7 @@ canvas {
 .zoom-overlay {
   position: absolute;
   border: 2px solid var(--color-highlight);
-  background: rgba(255, 152, 0, 0.1);
+  background: color-mix(in srgb, var(--color-highlight) 10%, transparent);
   pointer-events: none;
   border-radius: 2px;
 }
@@ -543,5 +540,8 @@ canvas {
 .reset-zoom-btn {
   padding: 0.3rem 0.8rem;
   font-size: 0.75rem;
+}
+
+#undoZoomBtn {
   margin-left: auto;
 }

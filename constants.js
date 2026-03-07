@@ -51,6 +51,7 @@ export const RAMP_OFF_INACTIVE = "rgba(255, 152, 0, 0.15)";
 
 // Demo timing (used by pe.js, packet.js, and demo.js)
 export const DEMO_HOP_DELAY = 100;
+export const DEMO_STEP_DELAY = 150;
 export const DEMO_PE_ON_DURATION = 200;
 export const DEMO_PE_BRIGHTEN_DURATION = 25;
 export const DEMO_PE_DIM_DURATION = 500;

@@ -14,7 +14,7 @@ let handleTraceGeneration = 0;
 let activeWorker = null; // current trace-loading worker, terminated on cancel/re-load
 
 // PE selection state
-let selectedPE = null; // { row, col, traceX, traceY, minCycle, cycleStates }
+let selectedPE = null; // { row, col, traceX, traceY, minCycle, totalCycles, busyArr, stallReasonArr, opArr, predArr, opCounts }
 let peTraceWindowStart = 0; // first cycle rendered in the current DOM window
 let peTraceWindowSize = 0;  // number of entries currently in the DOM
 let peTraceScrollLock = false; // prevents scroll-handler re-entrancy
@@ -110,11 +110,15 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
       }
       if (exIdx >= 0) {
         const opId = entry.opIds[exIdx];
-        pe.setBusy(!!entry.busy[exIdx], td.opLookup[opId], td.opEntryLookup[opId]);
+        if (td.opNopLookup[opId]) {
+          pe.setBusy(false, null, null);
+        } else {
+          pe.setBusy(!!entry.busy[exIdx], td.opLookup[opId], td.opEntryLookup[opId]);
+        }
       } else {
         pe.setBusy(false, null, null);
       }
-      if (stallIdx >= 0 && (exIdx < 0 || entry.cycles[stallIdx] >= entry.cycles[exIdx])) {
+      if (stallIdx >= 0) {
         const reasons = entry.stallReasons[stallIdx];
         const primary = reasons[0];
         grid.setPEStall(item.row, item.col, primary.type, primary.reason);
@@ -203,21 +207,35 @@ export function selectPE(row, col, traceX, traceY) {
     let curOp = null;
     let curPred = null;
     let curStallReason = null;
+    let curStallCycle = -1;
     for (let i = 0; i < totalCycles; i++) {
       const cycle = minCycle + i;
       while (evtIdx < entry.length && entry.cycles[evtIdx] <= cycle) {
         if (entry.stall[evtIdx]) {
           curStallReason = entry.stallReasons[evtIdx];
+          curStallCycle = entry.cycles[evtIdx];
         } else {
-          curBusy = entry.busy[evtIdx];
-          curOp = td.opLookup[entry.opIds[evtIdx]];
+          const opId = entry.opIds[evtIdx];
+          if (td.opNopLookup[opId]) {
+            // NOP: visually idle in the grid, but still show in trace text
+            curBusy = 0;
+          } else {
+            curBusy = entry.busy[evtIdx];
+          }
+          curOp = td.opLookup[opId];
           curPred = td.predLookup[entry.predIds[evtIdx]];
-          curStallReason = null;
+          // Clear stall only if this exec is at a later cycle — same-cycle
+          // stall+exec coexist (stall at issue stage, exec at EX stage)
+          if (entry.cycles[evtIdx] > curStallCycle) curStallReason = null;
         }
         evtIdx++;
       }
       if (curBusy) {
         busyArr[i] = 1;
+        opArr[i] = curOp;
+        predArr[i] = curPred;
+      } else if (curOp) {
+        // NOP: show op text in trace panel but not as busy
         opArr[i] = curOp;
         predArr[i] = curPred;
       }
@@ -371,7 +389,7 @@ function renderPETraceWindow(centerCycle) {
     // E stage (Execute)
     const eSpan = document.createElement("span");
     eSpan.className = busy ? "trace-pipe-stage trace-exec" : "trace-pipe-stage trace-idle";
-    eSpan.textContent = busy ? (opArr[i] || "?") : "IDLE";
+    eSpan.textContent = busy ? (opArr[i] || "?") : (opArr[i] || "IDLE");
     entry.appendChild(eSpan);
 
     frag.appendChild(entry);
@@ -473,7 +491,7 @@ export function updateReplayTick(timestamp) {
   const cyclesToAdvance = Math.floor(elapsed / msPerCycle);
   if (cyclesToAdvance <= 0) {
     // No cycle change — just sync fractional position for smooth animation
-    const frac = dir * Math.min(elapsed / msPerCycle, 1);
+    const frac = dir * Math.min(Math.max(0, elapsed) / msPerCycle, 1);
     syncTracedPackets(state.currentCycle, frac);
     return;
   }
@@ -484,8 +502,6 @@ export function updateReplayTick(timestamp) {
     ? Math.min(state.currentCycle + cyclesToAdvance, limit)
     : Math.max(state.currentCycle - cyclesToAdvance, limit);
 
-  const td = traceData;
-
   const actualAdvanced = Math.abs(endCycle - state.currentCycle);
   state.lastTickTime = Math.max(
     state.lastTickTime + actualAdvanced * msPerCycle,
@@ -494,11 +510,11 @@ export function updateReplayTick(timestamp) {
   state.currentCycle = endCycle;
 
   if (endCycle !== lastReconstructedCycle) {
-    const range = TraceParser.getLandingRange(td.landingIndex, endCycle);
+    const range = TraceParser.getLandingRange(traceData.landingIndex, endCycle);
     reconstructStateAtCycle(endCycle, range);
     lastReconstructedCycle = endCycle;
   }
-  const fraction = dir * Math.min((timestamp - state.lastTickTime) / msPerCycle, 1);
+  const fraction = dir * Math.min(Math.max(0, timestamp - state.lastTickTime) / msPerCycle, 1);
   syncTracedPackets(endCycle, fraction);
 
   updateScrubUI();
@@ -673,6 +689,7 @@ export function cancelReplay() {
   wavScanStart = 0;
   isScrubbing = false;
   scrubWasPlaying = false;
+  maxCycleStr = "";
   showPanel(null);
   els.cycleDisplay.textContent = "";
 }
@@ -686,6 +703,7 @@ export function handleTraceFile(event, setGrid) {
 
   // Null out stale replay/trace state so playback controls are inert during
   // loading, and so a thrown exception doesn't leave stale traceData behind.
+  deselectPE();
   state = null;
   traceData = null;
 
@@ -769,6 +787,8 @@ export function handleTraceFile(event, setGrid) {
         waveletList.sort((a, b) => a.firstCycle - b.firstCycle);
       }
 
+      const { entries: opEntryLookup, nops: opNopLookup } = buildOpEntryLookup(d.opLookup);
+
       const td = {
         dimX: d.dimX,
         dimY: d.dimY,
@@ -776,27 +796,25 @@ export function handleTraceFile(event, setGrid) {
         peStateIndex,
         peStateList,
         opLookup: d.opLookup,
-        opEntryLookup: buildOpEntryLookup(d.opLookup),
+        opEntryLookup,
+        opNopLookup,
         predLookup: d.predLookup,
         waveletList,
         hasWaveletData: d.hasWaveletData,
         minCycle: d.minCycle,
         maxCycle: d.maxCycle,
-        totalEvents: d.totalEvents,
       };
 
-      // Swap from loading bar back to playback controls
       els.loadingBar.classList.add("hidden");
-      els.playbackControls.classList.remove("hidden");
 
       if (td.dimX === 0 || td.dimY === 0 || td.minCycle > td.maxCycle) {
         els.cycleDisplay.textContent = "Error: invalid trace file";
         els.playbackBar.classList.add("hidden");
-        deselectPE();
         return;
       }
 
-      deselectPE();
+      els.playbackControls.classList.remove("hidden");
+
       lastReconstructedCycle = -1;
       wavScanStart = 0;
       traceData = td;
@@ -804,8 +822,6 @@ export function handleTraceFile(event, setGrid) {
       grid.showRamps = td.hasWaveletData;
       animationLoop.start();
       showPanel("trace");
-      els.traceLog.innerHTML = "";
-
       const { minCycle, maxCycle } = traceData;
       maxCycleStr = maxCycle.toLocaleString();
       const speed = 4;
@@ -825,7 +841,7 @@ export function handleTraceFile(event, setGrid) {
       els.scrubBar.max = maxCycle;
       els.scrubBar.value = minCycle;
       updateTransportUI();
-      updateScrubUI();
+      seekToCycle(minCycle);
     } // case "done"
     } // switch
   };

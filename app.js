@@ -32,10 +32,12 @@ let gridNaturalHeight = 0;
 let zoomDrag = null; // { startX, startY, canvasOffX, canvasOffY } or null
 let suppressNextClick = false;
 let viewportStack = []; // stack of previous viewports for undo
+let canvasBorder = 0;   // cached canvas border width (px)
 
 function init() {
   canvas = document.getElementById("wseCanvas");
   ctx = canvas.getContext("2d");
+  canvasBorder = parseFloat(getComputedStyle(canvas).borderWidth) || 0;
 
   els = {
     scrubBar: document.getElementById("scrubBar"),
@@ -93,7 +95,7 @@ function draw(timestamp) {
 }
 
 function watchDPR() {
-  const mq = matchMedia(`(resolution: ${devicePixelRatio}dppx)`);
+  const mq = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
   mq.addEventListener("change", () => { resizeCanvas(); watchDPR(); }, { once: true });
 }
 
@@ -127,10 +129,10 @@ function setupEventListeners() {
     if (e.code === "Space") {
       e.preventDefault();
       if (!getIsScrubbing()) transportPause();
-    } else if (e.key === "q") {
-      if (grid && grid.viewport) undoZoom();
+    } else if (e.key === "q" || e.key === "u" || e.key === "z") {
+      if (grid.viewport) undoZoom();
     } else if (e.key === "Escape") {
-      if (grid && grid.viewport) resetZoom();
+      if (grid.viewport) resetZoom();
     } else if (e.key === "ArrowRight") {
       e.preventDefault();
       transportStepFwd();
@@ -166,8 +168,7 @@ function eventToContainerPos(e) {
 // (inside the border), for grid coordinate mapping.
 function eventToCanvasCSS(e) {
   const rect = canvas.getBoundingClientRect();
-  const border = parseFloat(getComputedStyle(canvas).borderWidth) || 0;
-  return { x: e.clientX - rect.left - border, y: e.clientY - rect.top - border };
+  return { x: e.clientX - rect.left - canvasBorder, y: e.clientY - rect.top - canvasBorder };
 }
 
 function cssToLogical(cssX, cssY) {
@@ -264,7 +265,7 @@ function handleZoomDragStart(e) {
     const range = logicalRectToPERange(lo.x, lo.y, hi.x, hi.y);
     zoomDrag = null;
 
-    // Clamp to grid bounds
+    // setViewport clamps to grid bounds; pre-clamp here only for the size check
     const minRow = Math.max(0, range.minRow);
     const maxRow = Math.min(grid.rows - 1, range.maxRow);
     const minCol = Math.max(0, range.minCol);
@@ -290,7 +291,7 @@ function handleZoomDragStart(e) {
 }
 
 function undoZoom() {
-  if (!grid || viewportStack.length === 0) return;
+  if (viewportStack.length === 0) return;
   const prev = viewportStack.pop();
   if (prev) {
     grid.setViewport(prev.minRow, prev.maxRow, prev.minCol, prev.maxCol);
@@ -302,7 +303,6 @@ function undoZoom() {
 }
 
 function resetZoom() {
-  if (!grid) return;
   grid.clearViewport();
   viewportStack.length = 0;
   updateZoomButtons();
@@ -310,7 +310,7 @@ function resetZoom() {
 }
 
 function updateZoomButtons() {
-  const zoomed = grid && grid.viewport;
+  const zoomed = !!grid.viewport;
   els.resetZoomBtn.classList.toggle("hidden", !zoomed);
   els.undoZoomBtn.classList.toggle("hidden", !zoomed);
 }
@@ -378,8 +378,7 @@ function setGrid(rows, cols) {
   viewportStack.length = 0;
   viewportOffsetX = 0;
   viewportOffsetY = 0;
-  els.undoZoomBtn.classList.add("hidden");
-  els.resetZoomBtn.classList.add("hidden");
+  updateZoomButtons();
   const vp = grid.getViewportNaturalSize();
   gridNaturalWidth = vp.width;
   gridNaturalHeight = vp.height;

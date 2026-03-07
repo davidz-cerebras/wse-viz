@@ -124,7 +124,6 @@ function postResult(traceData) {
       hasWaveletData: traceData.hasWaveletData,
       minCycle: traceData.minCycle,
       maxCycle: traceData.maxCycle,
-      totalEvents: traceData.totalEvents,
     },
   }, transfer);
 }

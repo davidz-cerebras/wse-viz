@@ -8,6 +8,17 @@ import {
 } from "./constants.js";
 
 
+// Convert trace (x,y) to grid PE and add an active ramp triangle to the path.
+function _addActiveRamp(path, trX, trY, dimY, dir, isOn, rows, cols, pes) {
+  const r = dimY - 1 - trY, c = trX;
+  if (r >= 0 && r < rows && c >= 0 && c < cols) {
+    const pe = pes[r * cols + c];
+    _addRampTriangle(path, pe.cx, pe.cy, dir, isOn);
+    return true;
+  }
+  return false;
+}
+
 // Add a single active ramp triangle to the given Path2D.
 function _addRampTriangle(p, cx, cy, dir, isOn) {
   const s = ARROW_SIZE;
@@ -156,11 +167,10 @@ export class Grid {
     const toPE = this.getPE(toRow, toCol);
     if (!fromPE || !toPE) return;
 
-    const half = CELL_SIZE / 2;
     this.packets.push(
       new DataPacket(
-        fromPE.x + half, fromPE.y + half,
-        toPE.x + half, toPE.y + half,
+        fromPE.cx, fromPE.cy,
+        toPE.cx, toPE.cy,
         startTime, duration,
       ),
     );
@@ -195,10 +205,11 @@ export class Grid {
     if (this.zoomPreview) {
       const zp = this.zoomPreview;
       ctx.fillStyle = ZOOM_PREVIEW_COLOR;
+      const cols = this.cols;
       for (let row = zp.minRow; row <= zp.maxRow; row++) {
         for (let col = zp.minCol; col <= zp.maxCol; col++) {
-          const pe = this.getPE(row, col);
-          if (pe) ctx.fillRect(pe.x, pe.y, CELL_SIZE, CELL_SIZE);
+          const pe = this.pes[row * cols + col];
+          ctx.fillRect(pe.x, pe.y, CELL_SIZE, CELL_SIZE);
         }
       }
     }
@@ -246,17 +257,6 @@ export class Grid {
     const onActive = new Path2D();
     let hasOff = false, hasOn = false;
 
-    // Helper: convert trace (x,y) to grid PE, add ramp triangle
-    const addActive = (path, trX, trY, dimY, dir, isOn) => {
-      const r = dimY - 1 - trY, c = trX;
-      if (r >= 0 && r < rows && c >= 0 && c < cols) {
-        const pe = pes[r * cols + c];
-        _addRampTriangle(path, pe.cx, pe.cy, dir, isOn);
-        return true;
-      }
-      return false;
-    };
-
     for (const pkt of this.packets) {
       if (!pkt.waypoints || !pkt.visible) continue;
       const wpI = pkt.wpIdx;
@@ -271,18 +271,18 @@ export class Grid {
         // the departure cycle, while the packet is still visually at the
         // on-ramp. This previews the wavelet's intended next direction.
         if (cur.arriveDir && cur.arriveDir !== "R")
-          hasOn = addActive(onActive, cur.x, cur.y, dimY, cur.arriveDir, true) || hasOn;
+          hasOn = _addActiveRamp(onActive, cur.x, cur.y, dimY, cur.arriveDir, true, rows, cols, pes) || hasOn;
         if (cur.departDir)
-          hasOff = addActive(offActive, cur.x, cur.y, dimY, cur.departDir, false) || hasOff;
+          hasOff = _addActiveRamp(offActive, cur.x, cur.y, dimY, cur.departDir, false, rows, cols, pes) || hasOff;
       } else if (depCycle !== null && wpI < pkt.waypoints.length - 1) {
         if (cur.departDir)
-          hasOff = addActive(offActive, cur.x, cur.y, dimY, cur.departDir, false) || hasOff;
+          hasOff = _addActiveRamp(offActive, cur.x, cur.y, dimY, cur.departDir, false, rows, cols, pes) || hasOff;
         const next = pkt.waypoints[wpI + 1];
         if (next.arriveDir && next.arriveDir !== "R")
-          hasOn = addActive(onActive, next.x, next.y, dimY, next.arriveDir, true) || hasOn;
+          hasOn = _addActiveRamp(onActive, next.x, next.y, dimY, next.arriveDir, true, rows, cols, pes) || hasOn;
       } else {
         if (cur.arriveDir && cur.arriveDir !== "R")
-          hasOn = addActive(onActive, cur.x, cur.y, dimY, cur.arriveDir, true) || hasOn;
+          hasOn = _addActiveRamp(onActive, cur.x, cur.y, dimY, cur.arriveDir, true, rows, cols, pes) || hasOn;
       }
     }
 

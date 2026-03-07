@@ -3,8 +3,8 @@ import {
   PE_COLOR_IDLE, PE_COLOR_EXEC, PE_COLOR_FP_ARITH, PE_COLOR_INT_ARITH, PE_COLOR_CTRL, PE_COLOR_TASK, PE_COLOR_MEM_READ, PE_COLOR_MEM_WRITE,
   PE_STALL_TEXT_WAVELET, PE_STALL_TEXT_PIPE, PE_SELECT_COLOR,
   PE_TEXT_DEFAULT, PE_TEXT_DEFAULT_SUB, PE_TEXT_CTRL, PE_TEXT_CTRL_SUB, PE_TEXT_TASK, PE_TEXT_TASK_SUB,
+  DEMO_PE_ON_DURATION, DEMO_PE_BRIGHTEN_DURATION, DEMO_PE_DIM_DURATION,
 } from "./constants.js";
-import { DEMO_PE_ON_DURATION, DEMO_PE_BRIGHTEN_DURATION, DEMO_PE_DIM_DURATION } from "./constants.js";
 
 // Operation categories for PE color-coding:
 //   "fp-arith"  = floating-point compute (green)
@@ -256,8 +256,8 @@ export function setOpBitmapScale(scale) {
 }
 
 function _getOpBitmap(entry) {
-  let bm = _opBitmapCache.get(entry);
-  if (bm) return bm;
+  const cached = _opBitmapCache.get(entry);
+  if (cached) return cached;
 
   // Render at device pixels: CELL_SIZE * scale, where scale = canvasScale * dpr.
   // draw() uses drawImage(bm, x, y, CELL_SIZE, CELL_SIZE) in logical coords,
@@ -289,33 +289,32 @@ function _getOpBitmap(entry) {
     cx.fillText(entry.symbol, half, half);
   }
 
-  bm = c;
-  _opBitmapCache.set(entry, bm);
-  return bm;
+  _opBitmapCache.set(entry, c);
+  return c;
 }
 
 // Build a pre-computed lookup table from interned opcode IDs to SYMBOLIC_OPS entries.
 // Called once at load time so that setBusy/draw never need to split strings or
 // hash-lookup SYMBOLIC_OPS.
-const NOP_ENTRY = { isNop: true };
-
 export function buildOpEntryLookup(opLookup) {
-  const table = new Array(opLookup.length);
+  const entries = new Array(opLookup.length);
+  const nops = new Uint8Array(opLookup.length);
   for (let i = 0; i < opLookup.length; i++) {
     const op = opLookup[i];
     if (op) {
       if (op === "NOP" || op.startsWith("NOP.")) {
-        table[i] = NOP_ENTRY;
+        entries[i] = null;
+        nops[i] = 1;
       } else {
         const dotIdx = op.indexOf(".");
         const baseOp = dotIdx >= 0 ? op.substring(0, dotIdx) : op;
-        table[i] = SYMBOLIC_OPS[baseOp] || null;
+        entries[i] = SYMBOLIC_OPS[baseOp] || null;
       }
     } else {
-      table[i] = null;
+      entries[i] = null;
     }
   }
-  return table;
+  return { entries, nops };
 }
 
 export class PE {
@@ -350,13 +349,12 @@ export class PE {
   }
 
   setBusy(busy, op, opEntry) {
-    const isNop = opEntry ? opEntry.isNop : false;
-    this.op = isNop ? null : (op || null);
-    this.opEntry = isNop ? null : opEntry;
+    this.op = op || null;
+    this.opEntry = opEntry || null;
     this.stall = null;
     this.stallReason = null;
     this.fillColor = this.opEntry ? this.opEntry.fillColor
-      : ((busy && !isNop) ? PE_COLOR_EXEC : PE_COLOR_IDLE);
+      : (busy ? PE_COLOR_EXEC : PE_COLOR_IDLE);
   }
 
   activate(now) {

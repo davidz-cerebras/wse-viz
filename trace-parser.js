@@ -39,6 +39,7 @@ export function decodeDeparting(mask) {
 // compute tiles ("P<x>.<y> (hwtile)"). We intentionally ignore IO tile events
 // in the current implementation — they handle host I/O and are not part of the
 // PE grid visualization. We may revisit this in the future.
+const dimRegex = /^@\d+ dimX=(\d+), dimY=(\d+)/;
 const iotileTest = /\(iotile\)/;
 
 function parseLanding(line) {
@@ -164,7 +165,6 @@ export class TraceParser {
     let minCycle = Infinity, maxCycle = -Infinity;
     let totalEvents = 0;
 
-    const dimRegex = /^@\d+ dimX=(\d+), dimY=(\d+)/;
     const prevExState = new Map();
     const peStateTemp = new Map();
     const waveletTemp = new Map();
@@ -245,7 +245,7 @@ export class TraceParser {
           const om = after.match(opcodeRegex);
           const pred = om ? (om[1] || null) : null;
           const op = om ? om[2] : null;
-          const exState = flatStr(`1:${pred || ""}:${op || ""}`);
+          const exState = `1:${pred || ""}:${op || ""}`;
           if (prevExState.get(key) !== exState) {
             prevExState.set(key, exState);
             const pe = getPEEntry(key);
@@ -319,7 +319,7 @@ export class TraceParser {
       let lastNL = bytes.length - 1;
       while (lastNL >= 0 && bytes[lastNL] !== 10) lastNL--;
 
-      if (lastNL < 0) { carryover = bytes.slice(0); continue; }
+      if (lastNL < 0) { carryover = bytes; continue; }
 
       const text = decoder.decode(bytes.subarray(0, lastNL + 1));
       carryover = lastNL + 1 < bytes.length ? bytes.slice(lastNL + 1) : new Uint8Array(0);
@@ -480,6 +480,13 @@ export class TraceParser {
       // The merge dedup maintains its own consistent state.
     }
 
+    // Sort merged PE events by cycle. Segments are individually cycle-ordered,
+    // but straddling-line handling can produce out-of-order events at boundaries.
+    for (const [, dst] of mergedPE) {
+      TraceParser._sortParallelByCycle(dst.cycles,
+        dst.busy, dst.opIds, dst.predIds, dst.stall, dst.stallReasons);
+    }
+
     mp("Compacting PE state\u2026", 25);
     const peStateIndex = TraceParser._compactPEState(mergedPE, (f) => mp("Compacting PE state\u2026", 25 + f * 10));
 
@@ -508,6 +515,12 @@ export class TraceParser {
       }
     }
 
+    // Sort merged wavelet hops by cycle (same boundary concern as PE state)
+    for (const [, dst] of mergedWav) {
+      TraceParser._sortParallelByCycle(dst.cycles,
+        dst.xs, dst.ys, dst.landings, dst.departings, dst.consumed);
+    }
+
     mp("Compacting wavelets\u2026", 50);
     const waveletIndex = TraceParser._compactWavelets(mergedWav, (f) => mp("Compacting wavelets\u2026", 50 + f * 35));
 
@@ -532,6 +545,22 @@ export class TraceParser {
 
     return { dimX, dimY, landingIndex, peStateIndex, opLookup, predLookup,
              waveletIndex, hasWaveletData, minCycle, maxCycle, totalEvents };
+  }
+
+  // Sort parallel arrays by the cycles array. No-op if already sorted.
+  static _sortParallelByCycle(cycles, ...arrays) {
+    const n = cycles.length;
+    if (n < 2) return;
+    let sorted = true;
+    for (let i = 1; i < n; i++) {
+      if (cycles[i] < cycles[i - 1]) { sorted = false; break; }
+    }
+    if (sorted) return;
+    const order = Array.from({ length: n }, (_, i) => i);
+    order.sort((a, b) => cycles[a] - cycles[b]);
+    const reorder = (arr) => { const t = arr.slice(); for (let i = 0; i < n; i++) arr[i] = t[order[i]]; };
+    reorder(cycles);
+    for (const arr of arrays) reorder(arr);
   }
 
   // --- Shared compaction helpers (used by both index and mergeSegments) ---

@@ -108,18 +108,17 @@ export function extractBranches(wavelet) {
           // The fork PE is the second-to-last waypoint (the last one is the next PE
           // that was just pushed for the main branch's first direction)
           const forkPeWp = waypoints[waypoints.length - 2];
-          const parentArriveDir = forkPeWp.arriveDir;
-          const nextArriveDir = getLandingDir(dep.depCycle + 1, fromX + d[0], fromY + d[1]) || DIR_OPPOSITE[dir];
-          const forkCrossingStart = forkPeWp.cycle;
+          const fnx = fromX + d[0], fny = fromY + d[1], fnc = dep.depCycle + 1;
+          const nextArriveDir = getLandingDir(fnc, fnx, fny) || DIR_OPPOSITE[dir];
           const forkStart = {
-            cycle: forkCrossingStart, x: fromX, y: fromY,
-            arriveDir: parentArriveDir, departDir: dir, depCycle: dep.depCycle,
+            cycle: forkPeWp.cycle, x: fromX, y: fromY,
+            arriveDir: forkPeWp.arriveDir, departDir: dir, depCycle: dep.depCycle,
           };
           const forkDest = {
-            cycle: dep.depCycle + 1, x: fromX + d[0], y: fromY + d[1],
+            cycle: fnc, x: fnx, y: fny,
             arriveDir: nextArriveDir, departDir: null, depCycle: null,
           };
-          continueTrace([forkStart, forkDest], fromX + d[0], fromY + d[1], dep.depCycle + 1);
+          continueTrace([forkStart, forkDest], fnx, fny, fnc);
         }
       }
 
@@ -235,7 +234,7 @@ export class TracedPacket {
   /** Update cycle state and fractional position in one call. */
   syncTo(cycle, fc) {
     this.done = cycle > this.endCycle;
-    this.visible = cycle >= this.startCycle;
+    this.visible = cycle >= this.startCycle && !this.done;
     this.fractionalCycle = fc;
     // Update cached waypoint index, starting from previous position for
     // amortized O(1) during forward playback. Falls back to scanning
