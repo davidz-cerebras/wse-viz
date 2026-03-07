@@ -1,16 +1,19 @@
 import {
   CELL_SIZE,
-  PE_COLOR_IDLE, PE_COLOR_EXEC, PE_COLOR_FP_ARITH, PE_COLOR_INT_ARITH, PE_COLOR_CTRL, PE_COLOR_TASK,
-  PE_COLOR_STALL_WAVELET, PE_COLOR_STALL_PIPE,
+  PE_COLOR_IDLE, PE_COLOR_EXEC, PE_COLOR_FP_ARITH, PE_COLOR_INT_ARITH, PE_COLOR_CTRL, PE_COLOR_TASK, PE_COLOR_MEM_READ, PE_COLOR_MEM_WRITE,
   PE_STALL_TEXT_WAVELET, PE_STALL_TEXT_PIPE, PE_SELECT_COLOR,
   PE_TEXT_DEFAULT, PE_TEXT_DEFAULT_SUB, PE_TEXT_CTRL, PE_TEXT_CTRL_SUB, PE_TEXT_TASK, PE_TEXT_TASK_SUB,
 } from "./constants.js";
-import { DEMO_PE_ON_DURATION, DEMO_PE_BRIGHTEN_DURATION, DEMO_PE_DIM_DURATION } from "./demo.js";
+import { DEMO_PE_ON_DURATION, DEMO_PE_BRIGHTEN_DURATION, DEMO_PE_DIM_DURATION } from "./constants.js";
 
 // Operation categories for PE color-coding:
-//   "fp-arith" = floating-point arithmetic (green)
-//   "int-arith" = integer arithmetic (yellow-green)
-//   undefined = everything else: comparisons, moves, loads, stores, DSR, control (blue)
+//   "fp-arith"  = floating-point compute (green)
+//   "int-arith" = integer/fixed-point compute (yellow-green)
+//   "ctrl"      = control flow: comparisons, jumps (light yellow)
+//   "task"      = task management: activate, block, yield (grey)
+//   "mem-read"  = memory read: loads (steel blue)
+//   "mem-write" = memory write: stores (warm orange)
+//   undefined   = everything else: moves, conversions, bitwise, DSR config (blue)
 const SYMBOLIC_OPS = {
   // FP32 arithmetic
   FADDS:  { symbol: "+", sub: "F32", cat: "fp-arith" },
@@ -23,9 +26,9 @@ const SYMBOLIC_OPS = {
   FDPS:   { symbol: "\u22c5", sub: "F32", cat: "fp-arith" },
   FMOV32: { symbol: "MOV", sub: "F32" },
   FMOVS:  { symbol: "MOV", sub: "F32" },
-  FSTDPAS:{ symbol: "ST", sub: "F32" },
-  FSTDPAE:{ symbol: "ST", sub: "F32" },
-  FSTDPAH:{ symbol: "ST", sub: "F16" },
+  FSTDPAS:{ symbol: "ST", sub: "F32", cat: "mem-write" },
+  FSTDPAE:{ symbol: "ST", sub: "F32", cat: "mem-write" },
+  FSTDPAH:{ symbol: "ST", sub: "F16", cat: "mem-write" },
   FCPSS:  { symbol: "CPS", sub: "F32", cat: "fp-arith" },
   FABSS:  { symbol: "ABS", sub: "F32", cat: "fp-arith" },
   FNEGS:  { symbol: "\u2212", sub: "F32", cat: "fp-arith" },
@@ -37,6 +40,7 @@ const SYMBOLIC_OPS = {
   FLTUS:  { symbol: "<", sub: "F32", cat: "ctrl" },
   FLTEQS: { symbol: "\u2264", sub: "F32", cat: "ctrl" },
   FLTEQUS:{ symbol: "\u2264", sub: "F32", cat: "ctrl" },
+  FUNS:   { symbol: "NaN", sub: "F32", cat: "ctrl" },
   FMULE:  { symbol: "\u00d7", sub: "F32", cat: "fp-arith" },
   FSUBE:  { symbol: "\u2212", sub: "F32", cat: "fp-arith" },
   FMACE:  { symbol: "\u00d7+", sub: "F32", cat: "fp-arith" },
@@ -47,6 +51,8 @@ const SYMBOLIC_OPS = {
   FSQRE:  { symbol: "\u00d7", sub: "F32", cat: "fp-arith" },
   FSSQRS: { symbol: "\u22c5", sub: "F32", cat: "fp-arith" },
   FSSQRE: { symbol: "\u22c5", sub: "F32", cat: "fp-arith" },
+  FSCALES:{ symbol: "SCALE", sub: "F32", cat: "fp-arith" },
+  FNORMS: { symbol: "NORM", sub: "F32", cat: "fp-arith" },
   FDIVSS: { symbol: "\u00f7", sub: "F32", cat: "fp-arith" },
   FADDHS: { symbol: "+", sub: "F16\u2192F32", cat: "fp-arith" },
   FADDSH: { symbol: "+", sub: "F32\u2192F16", cat: "fp-arith" },
@@ -61,6 +67,8 @@ const SYMBOLIC_OPS = {
   FDPH:   { symbol: "\u22c5", sub: "F16", cat: "fp-arith" },
   FSQRH:  { symbol: "\u00d7", sub: "F16", cat: "fp-arith" },
   FSSQRH: { symbol: "\u22c5", sub: "F16", cat: "fp-arith" },
+  FSCALEH:{ symbol: "SCALE", sub: "F16", cat: "fp-arith" },
+  FNORMH: { symbol: "NORM", sub: "F16", cat: "fp-arith" },
   FDIVSH: { symbol: "\u00f7", sub: "F16", cat: "fp-arith" },
   FMOV16: { symbol: "MOV", sub: "F16" },
   FMOVH:  { symbol: "MOV", sub: "F16" },
@@ -75,6 +83,7 @@ const SYMBOLIC_OPS = {
   FLTUH:  { symbol: "<", sub: "F16", cat: "ctrl" },
   FLTEQH: { symbol: "\u2264", sub: "F16", cat: "ctrl" },
   FLTEQUH:{ symbol: "\u2264", sub: "F16", cat: "ctrl" },
+  FUNH:   { symbol: "NaN", sub: "F16", cat: "ctrl" },
   // FP/int/fixed-point conversion
   FH2S:   { symbol: "CVT", sub: "F16\u2192F32" },
   FS2H:   { symbol: "CVT", sub: "F32\u2192F16" },
@@ -99,14 +108,15 @@ const SYMBOLIC_OPS = {
   IMUL16UD:{ symbol: "\u00d7", sub: "I16\u2192I32", cat: "int-arith" },
   IMUL16SD:{ symbol: "\u00d7", sub: "I16\u2192I32", cat: "int-arith" },
   IADD16: { symbol: "+", sub: "I16\u2192I32", cat: "int-arith" },
-  SLL16:  { symbol: "\u00ab", sub: "I16", cat: "int-arith" },
-  SLR16:  { symbol: "\u00bb", sub: "I16", cat: "int-arith" },
-  SAR16:  { symbol: "\u00bb", sub: "I16", cat: "int-arith" },
-  XOR16:  { symbol: "\u2295", sub: "I16" },
-  AND16:  { symbol: "&", sub: "I16" },
-  ANDN16: { symbol: "&~", sub: "I16" },
-  OR16:   { symbol: "|", sub: "I16" },
-  NOT16:  { symbol: "~", sub: "I16" },
+  LDA:    { symbol: "+", sub: "I16", cat: "int-arith" },
+  SLL16:  { symbol: "\u226a", sub: "I16" },
+  SLR16:  { symbol: "\u226b", sub: "I16" },
+  SAR16:  { symbol: "\u226b", sub: "I16" },
+  XOR16:  { symbol: "XOR", sub: "I16" },
+  AND16:  { symbol: "AND", sub: "I16" },
+  ANDN16: { symbol: "ANDN", sub: "I16" },
+  OR16:   { symbol: "OR", sub: "I16" },
+  NOT16:  { symbol: "NOT", sub: "I16" },
   IMOV16: { symbol: "MOV", sub: "I16" },
   EQ16:   { symbol: "=", sub: "I16", cat: "ctrl" },
   LT16:   { symbol: "<", sub: "I16", cat: "ctrl" },
@@ -123,11 +133,11 @@ const SYMBOLIC_OPS = {
   ADD32:  { symbol: "+", sub: "I32", cat: "int-arith" },
   SUB32:  { symbol: "\u2212", sub: "I32", cat: "int-arith" },
   NEG32:  { symbol: "\u2212", sub: "I32", cat: "int-arith" },
-  XOR32:  { symbol: "\u2295", sub: "I32" },
-  AND32:  { symbol: "&", sub: "I32" },
-  ANDN32: { symbol: "&~", sub: "I32" },
-  OR32:   { symbol: "|", sub: "I32" },
-  NOT32:  { symbol: "~", sub: "I32" },
+  XOR32:  { symbol: "XOR", sub: "I32" },
+  AND32:  { symbol: "AND", sub: "I32" },
+  ANDN32: { symbol: "ANDN", sub: "I32" },
+  OR32:   { symbol: "OR", sub: "I32" },
+  NOT32:  { symbol: "NOT", sub: "I32" },
   IMOV32: { symbol: "MOV", sub: "I32" },
   EQ32:   { symbol: "=", sub: "I32", cat: "ctrl" },
   LT32:   { symbol: "<", sub: "I32", cat: "ctrl" },
@@ -137,17 +147,17 @@ const SYMBOLIC_OPS = {
   LTU32:  { symbol: "<", sub: "I32", cat: "ctrl" },
   LTEU32: { symbol: "\u2264", sub: "I32", cat: "ctrl" },
   // 8-bit fixed-point arithmetic
-  XADD8:  { symbol: "+", sub: "X8" },
-  XSUB8:  { symbol: "\u2212", sub: "X8" },
-  XMUL8:  { symbol: "\u00d7", sub: "X8" },
-  XDP8:   { symbol: "\u22c5", sub: "X8" },
-  XSQR8:  { symbol: "\u00d7", sub: "X8" },
-  XSSQR8: { symbol: "\u22c5", sub: "X8" },
-  XADD816:{ symbol: "+", sub: "X8\u2192X16" },
+  XADD8:  { symbol: "+", sub: "X8", cat: "int-arith" },
+  XSUB8:  { symbol: "\u2212", sub: "X8", cat: "int-arith" },
+  XMUL8:  { symbol: "\u00d7", sub: "X8", cat: "int-arith" },
+  XDP8:   { symbol: "\u22c5", sub: "X8", cat: "int-arith" },
+  XSQR8:  { symbol: "\u00d7", sub: "X8", cat: "int-arith" },
+  XSSQR8: { symbol: "\u22c5", sub: "X8", cat: "int-arith" },
+  XADD816:{ symbol: "+", sub: "X8\u2192X16", cat: "int-arith" },
   // Bit counting
-  CLZ16:  { symbol: "CLZ" },
-  CTZ16:  { symbol: "CTZ" },
-  POPCNT16:{ symbol: "POPCNT" },
+  CLZ16:  { symbol: "CLZ", cat: "int-arith" },
+  CTZ16:  { symbol: "CTZ", cat: "int-arith" },
+  POPCNT16:{ symbol: "POPCNT", cat: "int-arith" },
   SXTD16: { symbol: "SXTD", sub: "I16\u2192I32" },
   // Move (untyped)
   MOV16:  { symbol: "MOV", sub: "16" },
@@ -157,39 +167,43 @@ const SYMBOLIC_OPS = {
   UMOV16: { symbol: "MOV", sub: "16" },
   UMOV32: { symbol: "MOV", sub: "32" },
   JMP:    { symbol: "JMP", cat: "ctrl" },
-  LDCFG32:{ symbol: "LD", sub: "CFG" },
-  LD16:   { symbol: "LD", sub: "16" },
-  LD16RP: { symbol: "LD", sub: "32" },
-  LD32:   { symbol: "LD", sub: "32" },
-  LD16RQ: { symbol: "LD", sub: "64" },
-  LD64:   { symbol: "LD", sub: "64" },
-  LDR16P: { symbol: "LD", sub: "32" },
-  LDDDS:  { symbol: "DSR", sub: "LD D" },
-  LDDWDS: { symbol: "DSR", sub: "LD D" },
-  LDS0DS: { symbol: "DSR", sub: "LD S0" },
-  LDS0WDS:{ symbol: "DSR", sub: "LD S0" },
-  LDS1DS: { symbol: "DSR", sub: "LD S1" },
-  LDS1WDS:{ symbol: "DSR", sub: "LD S1" },
+  LDCFG32:{ symbol: "LD", sub: "CFG", cat: "mem-read" },
+  LD16:   { symbol: "LD", sub: "16", cat: "mem-read" },
+  LD16RP: { symbol: "LD", sub: "32", cat: "mem-read" },
+  LD32:   { symbol: "LD", sub: "32", cat: "mem-read" },
+  LD16RQ: { symbol: "LD", sub: "64", cat: "mem-read" },
+  LD64:   { symbol: "LD", sub: "64", cat: "mem-read" },
+  LDR16P: { symbol: "LD", sub: "32", cat: "mem-read" },
+  LDDDS:  { symbol: "DSR", sub: "LD D", cat: "mem-read" },
+  LDDWDS: { symbol: "DSR", sub: "LD D", cat: "mem-read" },
+  LDS0DS: { symbol: "DSR", sub: "LD S0", cat: "mem-read" },
+  LDS0WDS:{ symbol: "DSR", sub: "LD S0", cat: "mem-read" },
+  LDS1DS: { symbol: "DSR", sub: "LD S1", cat: "mem-read" },
+  LDS1WDS:{ symbol: "DSR", sub: "LD S1", cat: "mem-read" },
+  LDSR:   { symbol: "LD", sub: "SR", cat: "mem-read" },
+  LDXDS:  { symbol: "DSR", sub: "LD X", cat: "mem-read" },
   SETDDA: { symbol: "DSR", sub: "SET D.A" },
   SETDS0A:{ symbol: "DSR", sub: "SET S0.A" },
   SETDS1A:{ symbol: "DSR", sub: "SET S1.A" },
   SETDDL: { symbol: "DSR", sub: "SET D.L" },
   SETDS0L:{ symbol: "DSR", sub: "SET S0.L" },
   SETDS1L:{ symbol: "DSR", sub: "SET S1.L" },
-  STDDS:  { symbol: "DSR", sub: "ST D" },
-  STDWDS: { symbol: "DSR", sub: "ST D" },
-  STS0DS: { symbol: "DSR", sub: "ST S0" },
-  STS0WDS:{ symbol: "DSR", sub: "ST S0" },
-  STS1DS: { symbol: "DSR", sub: "ST S1" },
-  STS1WDS:{ symbol: "DSR", sub: "ST S1" },
+  STDDS:  { symbol: "DSR", sub: "ST D", cat: "mem-write" },
+  STDWDS: { symbol: "DSR", sub: "ST D", cat: "mem-write" },
+  STS0DS: { symbol: "DSR", sub: "ST S0", cat: "mem-write" },
+  STS0WDS:{ symbol: "DSR", sub: "ST S0", cat: "mem-write" },
+  STS1DS: { symbol: "DSR", sub: "ST S1", cat: "mem-write" },
+  STS1WDS:{ symbol: "DSR", sub: "ST S1", cat: "mem-write" },
+  STXDS:  { symbol: "DSR", sub: "ST X", cat: "mem-write" },
+  XP16STDPA:{ symbol: "ST", sub: "X16", cat: "mem-write" },
   CPDDS:  { symbol: "DSR", sub: "CP D" },
   CPSDS:  { symbol: "DSR", sub: "CP S" },
   CPDDSA: { symbol: "DSR", sub: "CP D.A" },
   CPSDSA: { symbol: "DSR", sub: "CP S.A" },
   SETJT:  { symbol: "MOV", sub: "JT" },
-  STCFG32:{ symbol: "ST", sub: "CFG" },
-  ST16:   { symbol: "ST", sub: "16" },
-  ST32:   { symbol: "ST", sub: "32" },
+  STCFG32:{ symbol: "ST", sub: "CFG", cat: "mem-write" },
+  ST16:   { symbol: "ST", sub: "16", cat: "mem-write" },
+  ST32:   { symbol: "ST", sub: "32", cat: "mem-write" },
   // Task management
   ACTVT:  { symbol: "ACTVT", cat: "task" },
   BLK:    { symbol: "BLK", cat: "task" },
@@ -199,34 +213,104 @@ const SYMBOLIC_OPS = {
   JMPT:   { symbol: "JMPT", cat: "task" },
 };
 
-// Pre-compute isText (symbol starts with uppercase letter) on each entry.
-// This avoids a regex test per PE per frame in draw().
+// Category → PE tile fill color (pre-computed to avoid per-frame branching)
+const CAT_FILL_COLOR = {
+  "fp-arith": PE_COLOR_FP_ARITH,
+  "int-arith": PE_COLOR_INT_ARITH,
+  "ctrl": PE_COLOR_CTRL,
+  "task": PE_COLOR_TASK,
+  "mem-read": PE_COLOR_MEM_READ,
+  "mem-write": PE_COLOR_MEM_WRITE,
+};
+
+// Pre-compute derived properties on each SYMBOLIC_OPS entry at module init.
 for (const entry of Object.values(SYMBOLIC_OPS)) {
   entry.isText = /^[A-Z]/.test(entry.symbol);
   entry.textColor = entry.cat === "task" ? PE_TEXT_TASK
     : entry.cat === "ctrl" ? PE_TEXT_CTRL : PE_TEXT_DEFAULT;
   entry.subColor = entry.cat === "task" ? PE_TEXT_TASK_SUB
     : entry.cat === "ctrl" ? PE_TEXT_CTRL_SUB : PE_TEXT_DEFAULT_SUB;
+  entry.fillColor = CAT_FILL_COLOR[entry.cat] || PE_COLOR_EXEC;
 }
 
 // Font constants derived from CELL_SIZE — identical for every PE, so computed
 // once at module level instead of per-instance.
 const FONT_SIZE_MAX_LABEL = CELL_SIZE * 0.25;
 const FONT_SIZE_SCALE_LABEL = CELL_SIZE * 1.2;
-const FONT_BOLD_TEXT = `bold ${CELL_SIZE * 0.32}px sans-serif`;
+const FONT_TEXT_MAX = CELL_SIZE * 0.32;   // max font size for text symbols
+const FONT_TEXT_FIT = CELL_SIZE * 1.4;    // shrink factor: fontSize = FIT / length
 const FONT_BOLD_MATH = `bold ${CELL_SIZE * 0.55}px sans-serif`;
 const FONT_SUB = `${CELL_SIZE * 0.2}px sans-serif`;
+
+// Pre-rendered op symbol bitmaps — eliminates per-PE font changes and fillText
+// during draw(). Rendered at full device resolution (CELL_SIZE × scale) so text
+// is crisp at the actual display size. Cache is invalidated when scale changes.
+let _opBitmapCache = new Map();
+let _opBitmapScale = 0;
+
+/** Called from app.js after resizeCanvas to update the rendering scale. */
+export function setOpBitmapScale(scale) {
+  if (scale === _opBitmapScale) return;
+  _opBitmapScale = scale;
+  _opBitmapCache.clear();
+}
+
+function _getOpBitmap(entry) {
+  let bm = _opBitmapCache.get(entry);
+  if (bm) return bm;
+
+  // Render at device pixels: CELL_SIZE * scale, where scale = canvasScale * dpr.
+  // draw() uses drawImage(bm, x, y, CELL_SIZE, CELL_SIZE) in logical coords,
+  // and the canvas transform maps that to device pixels — so the bitmap must
+  // contain CELL_SIZE * scale device pixels to be 1:1 at the final resolution.
+  const s = _opBitmapScale || 1;
+  const pxSize = Math.max(1, Math.round(CELL_SIZE * s));
+  const c = new OffscreenCanvas(pxSize, pxSize);
+  const cx = c.getContext("2d");
+  cx.scale(s, s);
+
+  const half = CELL_SIZE / 2;
+
+  cx.fillStyle = entry.textColor;
+  cx.textAlign = "center";
+  cx.font = entry.isText
+    ? `bold ${Math.min(FONT_TEXT_MAX, FONT_TEXT_FIT / entry.symbol.length)}px sans-serif`
+    : FONT_BOLD_MATH;
+
+  if (entry.sub) {
+    cx.textBaseline = "alphabetic";
+    cx.fillText(entry.symbol, half, half + CELL_SIZE * 0.05);
+    cx.font = FONT_SUB;
+    cx.fillStyle = entry.subColor;
+    cx.textBaseline = "top";
+    cx.fillText(entry.sub, half, half + CELL_SIZE * 0.1);
+  } else {
+    cx.textBaseline = "middle";
+    cx.fillText(entry.symbol, half, half);
+  }
+
+  bm = c;
+  _opBitmapCache.set(entry, bm);
+  return bm;
+}
 
 // Build a pre-computed lookup table from interned opcode IDs to SYMBOLIC_OPS entries.
 // Called once at load time so that setBusy/draw never need to split strings or
 // hash-lookup SYMBOLIC_OPS.
+const NOP_ENTRY = { isNop: true };
+
 export function buildOpEntryLookup(opLookup) {
   const table = new Array(opLookup.length);
   for (let i = 0; i < opLookup.length; i++) {
     const op = opLookup[i];
     if (op) {
-      const baseOp = op.includes(".") ? op.substring(0, op.indexOf(".")) : op;
-      table[i] = SYMBOLIC_OPS[baseOp] || null;
+      if (op === "NOP" || op.startsWith("NOP.")) {
+        table[i] = NOP_ENTRY;
+      } else {
+        const dotIdx = op.indexOf(".");
+        const baseOp = dotIdx >= 0 ? op.substring(0, dotIdx) : op;
+        table[i] = SYMBOLIC_OPS[baseOp] || null;
+      }
     } else {
       table[i] = null;
     }
@@ -249,6 +333,7 @@ export class PE {
     this.activationTime = 0;
     this.active = false;
     this.op = null;
+    this.opEntry = null;
     this.selected = false;
     // Execution/stall model:
     // The Schrodinger pipeline has 11 stages. A stall at one stage (e.g.,
@@ -261,18 +346,17 @@ export class PE {
     // (`!this.op`), which is the more performance-critical case to highlight.
     this.stall = null; // null, "wavelet", or "pipeline"
     this.stallReason = null; // compact label: "C6", "A0", "R3", "MEM", "S1DS0"
+    this.fillColor = PE_COLOR_IDLE;
   }
 
   setBusy(busy, op, opEntry) {
-    const isNop = op === "NOP" || (op && op.startsWith("NOP."));
-    this.brightness = (busy && !isNop) ? 1 : 0;
-    this.targetBrightness = this.brightness;
-    this.transitionDuration = 0;
-    this.active = false;
+    const isNop = opEntry ? opEntry.isNop : false;
     this.op = isNop ? null : (op || null);
-    this.opEntry = opEntry || null;
+    this.opEntry = isNop ? null : opEntry;
     this.stall = null;
     this.stallReason = null;
+    this.fillColor = this.opEntry ? this.opEntry.fillColor
+      : ((busy && !isNop) ? PE_COLOR_EXEC : PE_COLOR_IDLE);
   }
 
   activate(now) {
@@ -304,30 +388,13 @@ export class PE {
         this.brightness = this.targetBrightness;
         this.transitionDuration = 0;
       }
+      // Update fill color to reflect brightness change (demo animation)
+      this.fillColor = this.brightness > 0.5 ? PE_COLOR_EXEC : PE_COLOR_IDLE;
     }
   }
 
   draw(ctx) {
-    const entry = this.opEntry;
-    const cat = entry ? entry.cat : null;
-
-    // Stall colors only render when nothing is executing (!this.op).
-    // See the execution/stall model comment in the constructor.
-    if (this.stall === "wavelet" && !this.op) {
-      ctx.fillStyle = PE_COLOR_STALL_WAVELET;
-    } else if (this.stall && !this.op) {
-      ctx.fillStyle = PE_COLOR_STALL_PIPE;
-    } else if (cat === "fp-arith") {
-      ctx.fillStyle = PE_COLOR_FP_ARITH;
-    } else if (cat === "int-arith") {
-      ctx.fillStyle = PE_COLOR_INT_ARITH;
-    } else if (cat === "ctrl") {
-      ctx.fillStyle = PE_COLOR_CTRL;
-    } else if (cat === "task") {
-      ctx.fillStyle = PE_COLOR_TASK;
-    } else {
-      ctx.fillStyle = this.brightness > 0.5 ? PE_COLOR_EXEC : PE_COLOR_IDLE;
-    }
+    ctx.fillStyle = this.fillColor;
     ctx.fillRect(this.x, this.y, CELL_SIZE, CELL_SIZE);
 
     if (this.selected) {
@@ -348,28 +415,14 @@ export class PE {
 
     if (!this.op) return;
 
-    ctx.fillStyle = entry ? entry.textColor : PE_TEXT_DEFAULT;
-    ctx.textAlign = "center";
-
+    const entry = this.opEntry;
     if (entry) {
-      if (entry.sub) {
-        ctx.font = entry.isText ? FONT_BOLD_TEXT : FONT_BOLD_MATH;
-        ctx.textBaseline = "alphabetic";
-        ctx.fillText(entry.symbol, this.cx, this.cy + CELL_SIZE * 0.05);
-
-        ctx.font = FONT_SUB;
-        ctx.fillStyle = entry.subColor;
-        ctx.textBaseline = "top";
-        ctx.fillText(entry.sub, this.cx, this.cy + CELL_SIZE * 0.1);
-      } else {
-        ctx.font = entry.isText ? FONT_BOLD_TEXT : FONT_BOLD_MATH;
-        ctx.textBaseline = "middle";
-        ctx.fillText(entry.symbol, this.cx, this.cy);
-      }
+      ctx.drawImage(_getOpBitmap(entry), this.x, this.y, CELL_SIZE, CELL_SIZE);
     } else {
       const fontSize = Math.min(FONT_SIZE_MAX_LABEL, FONT_SIZE_SCALE_LABEL / this.op.length);
       ctx.font = `${fontSize}px sans-serif`;
       ctx.fillStyle = PE_TEXT_DEFAULT_SUB;
+      ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(this.op, this.cx, this.cy);
     }

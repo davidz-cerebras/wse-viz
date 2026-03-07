@@ -12,6 +12,7 @@
   --color-text: #ffffff;
   --color-text-muted: #5c6b8a;
   --color-text-secondary: #b0b8d4;
+  --color-highlight: #ff9800;
   --font-mono: "Monaco", "Menlo", "Ubuntu Mono", monospace;
 }
 
@@ -96,12 +97,12 @@ header h1 {
 }
 
 .file-input-label {
-  background: linear-gradient(135deg, #ff9800, #f57c00);
+  background: linear-gradient(135deg, var(--color-highlight), #f57c00);
   display: inline-block;
 }
 
 .file-input-label:hover {
-  background: linear-gradient(135deg, #ffa726, #ff9800);
+  background: linear-gradient(135deg, #ffa726, var(--color-highlight));
 }
 
 .cycle-display {
@@ -136,11 +137,10 @@ main {
   justify-content: center;
   align-items: center;
   flex: 1;
+  min-width: 0;
 }
 
 canvas {
-  max-width: 100%;
-  max-height: 100%;
   border: 2px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-bg-deep);
@@ -212,7 +212,7 @@ canvas {
 .loading-fill {
   height: 100%;
   width: 0%;
-  background: #ff9800;
+  background: var(--color-highlight);
   border-radius: 3px;
   transition: width 0.15s ease;
 }
@@ -220,7 +220,7 @@ canvas {
 .loading-pct {
   font-family: var(--font-mono);
   font-size: 0.85rem;
-  color: #ff9800;
+  color: var(--color-highlight);
   width: 4.5em;
   text-align: right;
   flex-shrink: 0;
@@ -241,11 +241,16 @@ canvas {
   background: var(--color-btn-hover);
 }
 
-#playPauseBtn {
-  width: 32px;
-  height: 32px;
-  font-size: 0.9rem;
-  line-height: 32px;
+.transport-btn {
+  width: 28px;
+  height: 28px;
+  font-size: 0.85rem;
+  line-height: 28px;
+}
+
+.transport-btn.active {
+  background: var(--color-accent);
+  color: var(--color-bg-deep);
 }
 
 .speed-btn {
@@ -311,6 +316,8 @@ canvas {
   white-space: nowrap;
   cursor: pointer;
   border-left: 3px solid transparent;
+  display: flex;
+  gap: 0.5rem;
 }
 
 .trace-cycle {
@@ -318,10 +325,6 @@ canvas {
   display: inline-block;
   min-width: 45px;
   text-align: right;
-}
-
-.trace-landing {
-  color: #ffb74d;
 }
 
 .trace-exec {
@@ -334,11 +337,6 @@ canvas {
 
 .trace-stall {
   color: #ef5350;
-}
-
-.trace-pipeline {
-  display: flex;
-  gap: 0.5rem;
 }
 
 .trace-pipe-stage {
@@ -359,7 +357,7 @@ canvas {
 
 .trace-entry.current {
   background: rgba(255, 152, 0, 0.25);
-  border-left: 3px solid #ff9800;
+  border-left: 3px solid var(--color-highlight);
 }
 
 .panel-resizer {
@@ -446,7 +444,7 @@ canvas {
 
 .op-chart-row.active .op-chart-bar {
   opacity: 1;
-  background: #ff9800;
+  background: var(--color-highlight);
 }
 
 .op-chart-count {
@@ -536,7 +534,7 @@ canvas {
 /* Zoom selection overlay (rubber-band rectangle during Shift+drag) */
 .zoom-overlay {
   position: absolute;
-  border: 2px solid #ff9800;
+  border: 2px solid var(--color-highlight);
   background: rgba(255, 152, 0, 0.1);
   pointer-events: none;
   border-radius: 2px;

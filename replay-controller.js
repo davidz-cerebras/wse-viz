@@ -1,14 +1,12 @@
 import { TraceParser, LANDING_DECODE } from "./trace-parser.js";
 import { extractBranches, TracedPacket } from "./wavelet.js";
 import { buildOpEntryLookup } from "./pe.js";
-import { MAX_LOG_ENTRIES, PE_TRACE_WINDOW } from "./constants.js";
+import { PE_TRACE_WINDOW } from "./constants.js";
 
-let grid, els, animationLoop, showPanel;
+let grid, els, animationLoop, showPanel, resizeCanvas;
 
-const replay = {
-  traceData: null,
-  state: null,
-};
+let traceData = null;
+let state = null;
 
 let isScrubbing = false;
 let scrubWasPlaying = false;
@@ -21,12 +19,16 @@ let peTraceWindowStart = 0; // first cycle rendered in the current DOM window
 let peTraceWindowSize = 0;  // number of entries currently in the DOM
 let peTraceScrollLock = false; // prevents scroll-handler re-entrancy
 let lastReconstructedCycle = -1; // tracks when to call reconstructStateAtCycle
+let maxCycleStr = ""; // cached String(maxCycle) for updateScrubUI
+
+let wavScanStart = 0; // low-water mark: wavelets before this index have expired
 
 export function initReplay(deps) {
   grid = deps.grid;
   els = deps.els;
   animationLoop = deps.animationLoop;
   showPanel = deps.showPanel;
+  resizeCanvas = deps.resizeCanvas;
 }
 
 export function setReplayGrid(g) {
@@ -34,35 +36,13 @@ export function setReplayGrid(g) {
 }
 
 export function getReplayState() {
-  return replay.state;
+  return state;
 }
 
 export function getIsScrubbing() {
   return isScrubbing;
 }
 
-function appendLandingEvents(cycle, landingRange) {
-  if (selectedPE || !landingRange) return;
-  const li = replay.traceData.landingIndex;
-  const { start, end } = landingRange;
-  for (let i = start; i < end; i++) {
-    const entry = document.createElement("div");
-    entry.className = "trace-entry trace-landing";
-    const dirChar = LANDING_DECODE[li.dirs[i]];
-    const dir = dirChar === "R" ? "local" : `\u2190 ${dirChar}`;
-    const cycleSpan = document.createElement("span");
-    cycleSpan.className = "trace-cycle";
-    cycleSpan.textContent = `@${cycle}`;
-    entry.appendChild(cycleSpan);
-    entry.appendChild(document.createTextNode(` P${li.xs[i]}.${li.ys[i]} ${dir} C${li.colors[i]}`));
-    els.traceLog.appendChild(entry);
-  }
-
-  while (els.traceLog.children.length > MAX_LOG_ENTRIES) {
-    els.traceLog.removeChild(els.traceLog.firstChild);
-  }
-  els.traceLog.scrollTop = els.traceLog.scrollHeight;
-}
 
 function getBranches(wv) {
   if (!wv._branches) wv._branches = extractBranches(wv);
@@ -70,17 +50,14 @@ function getBranches(wv) {
 }
 
 function syncTracedPackets(cycle, fraction) {
-  const fc = cycle + (fraction || 0);
+  const fc = cycle + (fraction ?? 0);
   for (const pkt of grid.packets) {
-    if (pkt instanceof TracedPacket) {
-      pkt.setCycle(cycle);
-      pkt.setFractionalCycle(fc);
-    }
+    if (pkt.syncTo) pkt.syncTo(cycle, fc);
   }
 }
 
 function sendLandingPackets(landingRange, msPerCycle, startTime) {
-  const td = replay.traceData;
+  const td = traceData;
   const li = td.landingIndex;
   const { start, end } = landingRange;
   for (let i = start; i < end; i++) {
@@ -99,29 +76,24 @@ function sendLandingPackets(landingRange, msPerCycle, startTime) {
  * to ensure a single consistent code path for state reconstruction.
  */
 function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
-  const td = replay.traceData;
+  const td = traceData;
   if (!td) return;
 
   grid.clearPackets();
 
-  // 1. Reconstruct EX OP + stall state from peStateList (pre-computed grid coords).
-  //
-  // Instead of resetAllPEs() + re-apply, we directly set each PE to its
-  // correct state (busy/idle/stalled). This avoids touching each PE twice.
-  //
-  // The peStateIndex interleaves EX OP and stall events in cycle order.
-  // We scan backward from targetCycle to find the most recent EX OP event
-  // (exIdx) and the most recent stall event (stallIdx). Both can be active
-  // simultaneously because they originate from different pipeline stages —
-  // a stall at the issue stage doesn't prevent execution at the EX stage.
-  // setPEBusy sets the op (and clears stall); setPEStall overlays the stall. In pe.draw(),
-  // the op takes visual priority (see execution/stall model in pe.js).
-  for (const pe of td.peStateList) {
-    const entry = pe.entry;
-    const found = TraceParser.findCycleIndexLE(
-      { cycles: entry.cycles, length: entry.length },
-      targetCycle,
-    );
+  // Retreat wavelet scan low-water mark on backward seek
+  if (targetCycle < lastReconstructedCycle) {
+    while (wavScanStart > 0 && td.waveletList[wavScanStart - 1].lastCycle >= targetCycle) {
+      wavScanStart--;
+    }
+  }
+
+  const cols = grid.cols;
+  const pes = grid.pes;
+  for (const item of td.peStateList) {
+    const entry = item.entry;
+    const pe = pes[item.row * cols + item.col];
+    const found = TraceParser.findCycleIndexLE(entry.cycles, entry.length, targetCycle);
     if (found >= 0) {
       let exIdx = -1;
       let stallIdx = -1;
@@ -129,52 +101,71 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
         if (!entry.stall[i]) { exIdx = i; break; }
         if (stallIdx < 0) stallIdx = i;
       }
+      // Also check for a same-cycle stall just before the EX entry.
+      // The pipeline can have a stall (e.g., at issue stage) and an
+      // executing op (at EX stage) simultaneously at the same cycle.
+      if (exIdx >= 0 && stallIdx < 0 && exIdx > 0 &&
+          entry.stall[exIdx - 1] && entry.cycles[exIdx - 1] === entry.cycles[exIdx]) {
+        stallIdx = exIdx - 1;
+      }
       if (exIdx >= 0) {
         const opId = entry.opIds[exIdx];
-        grid.setPEBusy(pe.row, pe.col, !!entry.busy[exIdx], td.opLookup[opId], td.opEntryLookup[opId]);
+        pe.setBusy(!!entry.busy[exIdx], td.opLookup[opId], td.opEntryLookup[opId]);
       } else {
-        grid.setPEBusy(pe.row, pe.col, false, null, null);
+        pe.setBusy(false, null, null);
       }
-      if (stallIdx >= 0 && (exIdx < 0 || stallIdx > exIdx)) {
+      if (stallIdx >= 0 && (exIdx < 0 || entry.cycles[stallIdx] >= entry.cycles[exIdx])) {
         const reasons = entry.stallReasons[stallIdx];
         const primary = reasons[0];
-        grid.setPEStall(pe.row, pe.col, primary.type, primary.reason);
+        grid.setPEStall(item.row, item.col, primary.type, primary.reason);
       }
     } else {
-      grid.setPEBusy(pe.row, pe.col, false, null, null);
+      pe.setBusy(false, null, null);
     }
   }
 
   // 2. Create packets for in-flight wavelets or DataPackets for old traces.
-  // waveletList is sorted by firstCycle, so we scan with early termination to skip wavelets
-  // that start after targetCycle, and iterate only the relevant prefix.
+  // waveletList is sorted by firstCycle. Binary search for upper bound,
+  // low-water mark skips expired wavelets from the bottom.
   if (td.waveletList) {
     const wvList = td.waveletList;
-    for (let wi = 0; wi < wvList.length; wi++) {
+    const wvLen = wvList.length;
+
+    // Binary search: find first index where firstCycle > targetCycle
+    let lo = wavScanStart, hi = wvLen;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (wvList[mid].firstCycle <= targetCycle) lo = mid + 1;
+      else hi = mid;
+    }
+    const upperBound = lo;
+
+    // Advance low-water mark past expired wavelets
+    while (wavScanStart < upperBound && wvList[wavScanStart].lastCycle < targetCycle) {
+      wavScanStart++;
+    }
+
+    for (let wi = wavScanStart; wi < upperBound; wi++) {
       const wv = wvList[wi];
-      const firstCycle = wv.hops.cycles[0];
-      if (firstCycle > targetCycle) break; // sorted: all remaining start later
-      const lastCycle = wv.hops.cycles[wv.hops.length - 1];
-      if (lastCycle < targetCycle) continue;
+      if (wv.lastCycle < targetCycle) continue;
       const branches = getBranches(wv);
       for (const waypoints of branches) {
         const branchEnd = waypoints[waypoints.length - 1].cycle;
         if (branchEnd < targetCycle) continue;
         const pkt = new TracedPacket(waypoints, td.dimY, wv.color, wv.ctrl, wv.lf);
-        pkt.setCycle(targetCycle);
-        pkt.setFractionalCycle(targetCycle);
+        pkt.syncTo(targetCycle, targetCycle);
         grid.packets.push(pkt);
       }
     }
   } else if (currentCycleLandings) {
-    // Old traces: create DataPackets from landing events for the current cycle
-    const msPerCycle = replay.state ? 1000 / replay.state.speed : 250;
+    const msPerCycle = 1000 / state.speed;
     sendLandingPackets(currentCycleLandings, msPerCycle);
   }
+
 }
 
 export function selectPE(row, col, traceX, traceY) {
-  if (!replay.traceData || !replay.state) return;
+  if (!traceData || !state) return;
 
   // Toggle off if clicking the same PE
   if (selectedPE && selectedPE.row === row && selectedPE.col === col) {
@@ -186,13 +177,15 @@ export function selectPE(row, col, traceX, traceY) {
   if (selectedPE) deselectPE();
 
   const key = `${traceX},${traceY}`;
-  const td = replay.traceData;
+  const td = traceData;
   const entry = td.peStateIndex.get(key);
 
   grid.selectPE(row, col);
+  els.tracePanel.classList.remove("hidden");
+  requestAnimationFrame(resizeCanvas);
   peTraceScrollLock = false;
 
-  const { minCycle, maxCycle } = replay.state;
+  const { minCycle, maxCycle } = state;
   const totalCycles = maxCycle - minCycle + 1;
 
   // Build flat per-cycle state arrays:
@@ -247,7 +240,7 @@ export function selectPE(row, col, traceX, traceY) {
   els.tracePanel.querySelector("h2").textContent = `P${traceX}.${traceY} Trace`;
 
   renderOpChart();
-  renderPETraceWindow(replay.state.currentCycle);
+  renderPETraceWindow(state.currentCycle);
   setupPETraceScroll();
 }
 
@@ -256,14 +249,15 @@ function renderOpChart() {
   const { opCounts } = selectedPE;
 
   els.opChart.innerHTML = "";
-  els.opChart.classList.remove("hidden");
-  els.panelResizer.classList.remove("hidden");
 
   if (opCounts.size === 0) {
     els.opChart.classList.add("hidden");
     els.panelResizer.classList.add("hidden");
     return;
   }
+
+  els.opChart.classList.remove("hidden");
+  els.panelResizer.classList.remove("hidden");
 
   // Sort by count descending
   const sorted = [...opCounts.entries()].sort((a, b) => b[1] - a[1]);
@@ -311,8 +305,8 @@ function renderOpChart() {
 }
 
 function updateOpChartHighlight() {
-  if (!selectedPE || !replay.state) return;
-  const idx = replay.state.currentCycle - selectedPE.minCycle;
+  if (!selectedPE || !state) return;
+  const idx = state.currentCycle - selectedPE.minCycle;
   let currentOp = null;
   if (idx >= 0 && idx < selectedPE.totalCycles && selectedPE.busyArr[idx]) {
     currentOp = (selectedPE.opArr[idx] || "?").split(".")[0];
@@ -347,7 +341,7 @@ function renderPETraceWindow(centerCycle) {
     const busy = busyArr[i];
     const stallReasons = stallReasonArr[i];
     const entry = document.createElement("div");
-    entry.className = "trace-entry trace-pipeline";
+    entry.className = "trace-entry";
     entry.dataset.cycle = cycle;
 
     const cycleSpan = document.createElement("span");
@@ -416,9 +410,11 @@ export function deselectPE() {
   selectedPE = null;
   peTraceWindowStart = 0;
   peTraceWindowSize = 0;
+  _highlightedEntry = null;
   els.traceLog.onscroll = null;
 
-  // Restore panel header
+  els.tracePanel.classList.add("hidden");
+  requestAnimationFrame(resizeCanvas);
   els.tracePanel.querySelector("h2").textContent = "Trace Events";
   els.traceLog.innerHTML = "";
   els.opChart.innerHTML = "";
@@ -430,25 +426,27 @@ export function deselectPE() {
   els.opChart.style.maxHeight = "";
 }
 
-function updatePETraceHighlight() {
-  if (!selectedPE || !replay.state) return;
+let _highlightedEntry = null; // cached reference to avoid querySelector per frame
 
-  const idx = replay.state.currentCycle - selectedPE.minCycle;
+function updatePETraceHighlight() {
+  if (!selectedPE || !state) return;
+
+  const idx = state.currentCycle - selectedPE.minCycle;
   const localIdx = idx - peTraceWindowStart;
 
   // Remove previous highlight
-  const prev = els.traceLog.querySelector(".trace-entry.current");
-  if (prev) prev.classList.remove("current");
+  if (_highlightedEntry) { _highlightedEntry.classList.remove("current"); _highlightedEntry = null; }
 
   // If current cycle is outside the rendered window, re-render around it
   if (idx >= 0 && idx < selectedPE.totalCycles) {
     if (localIdx < 0 || localIdx >= peTraceWindowSize) {
-      renderPETraceWindow(replay.state.currentCycle);
+      renderPETraceWindow(state.currentCycle);
       return; // renderPETraceWindow calls us recursively
     }
     const entries = els.traceLog.children;
     if (localIdx < entries.length) {
-      entries[localIdx].classList.add("current");
+      _highlightedEntry = entries[localIdx];
+      _highlightedEntry.classList.add("current");
       peTraceScrollLock = true;
       try { entries[localIdx].scrollIntoView({ block: "nearest" }); }
       finally { peTraceScrollLock = false; }
@@ -459,149 +457,185 @@ function updatePETraceHighlight() {
 }
 
 function updateScrubUI() {
-  if (!replay.state) return;
-  els.scrubBar.value = replay.state.currentCycle;
-  const maxStr = String(replay.state.maxCycle);
-  const curStr = String(replay.state.currentCycle).padStart(maxStr.length);
-  els.cycleDisplay.textContent = `Cycle ${curStr} / ${maxStr}`;
+  if (!state) return;
+  els.scrubBar.value = state.currentCycle;
+  const curStr = state.currentCycle.toLocaleString().padStart(maxCycleStr.length);
+  els.cycleDisplay.textContent = `Cycle ${curStr} / ${maxCycleStr}`;
 }
 
 export function updateReplayTick(timestamp) {
-  if (!replay.state || !replay.state.playing) return;
+  if (!state || !state.playing) return;
 
-  const elapsed = timestamp - replay.state.lastTickTime;
-  const msPerCycle = 1000 / replay.state.speed;
-
-  // Always sync fractional position for smooth animation, even between cycle ticks
-  const subCycleFraction = Math.min(elapsed / msPerCycle, 1);
-  syncTracedPackets(replay.state.currentCycle, subCycleFraction);
+  const dir = state.direction;
+  const elapsed = timestamp - state.lastTickTime;
+  const msPerCycle = 1000 / state.speed;
 
   const cyclesToAdvance = Math.floor(elapsed / msPerCycle);
-  if (cyclesToAdvance <= 0) return;
-
-  const endCycle = Math.min(
-    replay.state.currentCycle + cyclesToAdvance,
-    replay.state.maxCycle,
-  );
-
-  // Append landing events — only for the tail of the range to avoid
-  // wasteful DOM work when jumping many cycles (e.g. tab was backgrounded)
-  const td = replay.traceData;
-  const logStart = Math.max(replay.state.currentCycle + 1, endCycle - MAX_LOG_ENTRIES);
-  for (let c = logStart; c <= endCycle; c++) {
-    const range = TraceParser.getLandingRange(td.landingIndex, c);
-    if (range) appendLandingEvents(c, range);
+  if (cyclesToAdvance <= 0) {
+    // No cycle change — just sync fractional position for smooth animation
+    const frac = dir * Math.min(elapsed / msPerCycle, 1);
+    syncTracedPackets(state.currentCycle, frac);
+    return;
   }
 
-  const actualAdvanced = endCycle - replay.state.currentCycle;
-  replay.state.lastTickTime = Math.max(
-    replay.state.lastTickTime + actualAdvanced * msPerCycle,
+  // Advance (or retreat) by direction × cycles, clamped to trace bounds
+  const limit = dir > 0 ? state.maxCycle : state.minCycle;
+  const endCycle = dir > 0
+    ? Math.min(state.currentCycle + cyclesToAdvance, limit)
+    : Math.max(state.currentCycle - cyclesToAdvance, limit);
+
+  const td = traceData;
+
+  const actualAdvanced = Math.abs(endCycle - state.currentCycle);
+  state.lastTickTime = Math.max(
+    state.lastTickTime + actualAdvanced * msPerCycle,
     timestamp - msPerCycle,
   );
-  replay.state.currentCycle = endCycle;
+  state.currentCycle = endCycle;
 
-  // Only reconstruct when the cycle actually changes (not every frame)
   if (endCycle !== lastReconstructedCycle) {
     const range = TraceParser.getLandingRange(td.landingIndex, endCycle);
     reconstructStateAtCycle(endCycle, range);
     lastReconstructedCycle = endCycle;
   }
-  const fraction = (timestamp - replay.state.lastTickTime) / msPerCycle;
-  syncTracedPackets(endCycle, Math.min(fraction, 1));
+  const fraction = dir * Math.min((timestamp - state.lastTickTime) / msPerCycle, 1);
+  syncTracedPackets(endCycle, fraction);
 
   updateScrubUI();
   updatePETraceHighlight();
 
-  if (endCycle >= replay.state.maxCycle) {
-    replay.state.playing = false;
-    els.playPauseBtn.textContent = "\u25B6";
-    els.cycleDisplay.textContent =
-      `Done (${replay.traceData.totalEvents} events)`;
+  // Stop at trace boundary
+  if ((dir > 0 && endCycle >= state.maxCycle) ||
+      (dir < 0 && endCycle <= state.minCycle)) {
+    state.playing = false;
+    updateTransportUI();
   }
 }
 
-function resumePlayback() {
-  if (!replay.state || replay.state.currentCycle >= replay.state.maxCycle) return;
+
+// --- Transport state machine ---
+// States: forward-play, reverse-play, forward-paused, reverse-paused
+// state.direction: +1 (forward) or -1 (reverse)
+// state.playing: true (playing) or false (paused)
+
+function updateTransportUI() {
+  els.fwdPlayBtn.classList.toggle("active", state.playing && state.direction === 1);
+  els.revPlayBtn.classList.toggle("active", state.playing && state.direction === -1);
+  els.pauseBtn.classList.toggle("active", !state.playing);
+}
+
+function startPlaying(direction) {
+  if (!state) return;
+  state.direction = direction;
+  state.playing = true;
   const now = performance.now();
-  const msPerCycle = 1000 / replay.state.speed;
-  replay.state.playing = true;
-  replay.state.lastTickTime = now;
+  state.lastTickTime = now;
+  // Unfreeze any frozen DataPackets (from old traces after seek)
+  const msPerCycle = 1000 / state.speed;
   for (const pkt of grid.packets) {
     if (pkt.startTime === Infinity) {
       pkt.startTime = now;
       pkt.duration = msPerCycle;
     }
   }
-  els.playPauseBtn.textContent = "\u23F8";
+  updateTransportUI();
   animationLoop.start();
 }
 
-export function togglePlayback() {
-  if (!replay.state) return;
-  if (replay.state.playing) {
-    replay.state.playing = false;
-    els.playPauseBtn.textContent = "\u25B6";
+export function transportFwdPlay() {
+  if (!state) return;
+  if (state.playing && state.direction === 1) {
+    state.playing = false;
+    updateTransportUI();
+    return;
+  }
+  if (state.currentCycle >= state.maxCycle) {
+    seekToCycle(state.minCycle);
+  }
+  startPlaying(1);
+}
+
+export function transportRevPlay() {
+  if (!state) return;
+  if (state.playing && state.direction === -1) {
+    state.playing = false;
+    updateTransportUI();
+    return;
+  }
+  if (state.currentCycle <= state.minCycle) {
+    seekToCycle(state.maxCycle);
+  }
+  startPlaying(-1);
+}
+
+export function transportPause() {
+  if (!state) return;
+  if (state.playing) {
+    state.playing = false;
+    updateTransportUI();
   } else {
-    if (replay.state.currentCycle >= replay.state.maxCycle) {
-      seekToCycle(replay.state.minCycle);
+    // At boundary, wrap around before resuming
+    if (state.direction > 0 && state.currentCycle >= state.maxCycle) {
+      seekToCycle(state.minCycle);
+    } else if (state.direction < 0 && state.currentCycle <= state.minCycle) {
+      seekToCycle(state.maxCycle);
     }
-    resumePlayback();
+    startPlaying(state.direction);
   }
 }
 
-export function adjustSpeed(factor) {
-  if (!replay.state) return;
-  const newSpeed = replay.state.speed * factor;
-  if (newSpeed < 1) return;
-  replay.state.speed = newSpeed;
-  replay.state.lastTickTime = performance.now();
-  els.speedDisplay.textContent = `${newSpeed} Hz`;
-}
-
-// Step one cycle forward or backward with smooth animation.
-// Rate-limited to 16 steps/second — further presses are ignored until
-// the animation for the current step completes (62.5ms).
 const STEP_MS = 1000 / 16;
 let lastStepTime = 0;
 let stepAnimationId = 0;
 
-export function stepCycle(direction) {
-  if (!replay.state || !replay.traceData) return;
+function doStep(direction) {
+  if (!state || !traceData) return;
   const now = performance.now();
   if (now - lastStepTime < STEP_MS) return;
   lastStepTime = now;
 
-  if (replay.state.playing) {
-    replay.state.playing = false;
-    els.playPauseBtn.textContent = "\u25B6";
-  }
+  state.playing = false;
+  state.direction = direction;
+  updateTransportUI();
 
-  const targetCycle = replay.state.currentCycle + direction;
-  if (targetCycle < replay.state.minCycle || targetCycle > replay.state.maxCycle) return;
+  const targetCycle = state.currentCycle + direction;
+  if (targetCycle < state.minCycle || targetCycle > state.maxCycle) return;
 
   seekToCycle(targetCycle);
 
-  // Animate TracedPackets smoothly over the step duration.
-  // Interpolate fractional cycle from the previous cycle to the new one.
   const startCycle = targetCycle - direction;
   const stepStart = now;
   if (stepAnimationId) cancelAnimationFrame(stepAnimationId);
 
   function stepAnimate(timestamp) {
-    if (!replay.state || replay.state.playing) return;
+    if (!state || state.playing) return;
     const t = Math.min((timestamp - stepStart) / STEP_MS, 1);
     const fc = startCycle + direction * t;
     syncTracedPackets(targetCycle, fc - targetCycle);
     animationLoop.start();
     if (t < 1) {
       stepAnimationId = requestAnimationFrame(stepAnimate);
+    } else {
+      stepAnimationId = 0;
     }
   }
   stepAnimationId = requestAnimationFrame(stepAnimate);
 }
 
+export function transportStepFwd() { doStep(1); }
+export function transportStepBack() { doStep(-1); }
+
+export function adjustSpeed(factor) {
+  if (!state) return;
+  const newSpeed = state.speed * factor;
+  if (newSpeed < 1) return;
+  state.speed = newSpeed;
+  state.lastTickTime = performance.now();
+  els.speedDisplay.textContent = `${newSpeed} Hz`;
+}
+
 function seekToCycle(targetCycle) {
-  if (!replay.state || !replay.traceData || !Number.isFinite(targetCycle)) return;
+  if (!state || !traceData || !Number.isFinite(targetCycle)) return;
 
   grid.resetTimers();
 
@@ -609,20 +643,17 @@ function seekToCycle(targetCycle) {
   reconstructStateAtCycle(targetCycle);
   lastReconstructedCycle = targetCycle;
 
-  if (!selectedPE) {
-    els.traceLog.innerHTML = "";
-  }
-  replay.state.currentCycle = targetCycle;
-  replay.state.lastTickTime = performance.now();
+  state.currentCycle = targetCycle;
+  state.lastTickTime = performance.now();
   updateScrubUI();
   updatePETraceHighlight();
 
   // For old traces without wavelet data, show frozen DataPackets for the target cycle
-  const td = replay.traceData;
+  const td = traceData;
   if (!td.hasWaveletData) {
     const range = TraceParser.getLandingRange(td.landingIndex, targetCycle);
     if (range) {
-      const msPerCycle = 1000 / replay.state.speed;
+      const msPerCycle = 1000 / state.speed;
       sendLandingPackets(range, msPerCycle, Infinity);
     }
   }
@@ -636,9 +667,10 @@ export function cancelReplay() {
   if (stepAnimationId) { cancelAnimationFrame(stepAnimationId); stepAnimationId = 0; }
   lastStepTime = 0;
   deselectPE();
-  replay.state = null;
-  replay.traceData = null;
+  state = null;
+  traceData = null;
   lastReconstructedCycle = -1;
+  wavScanStart = 0;
   isScrubbing = false;
   scrubWasPlaying = false;
   showPanel(null);
@@ -654,15 +686,15 @@ export function handleTraceFile(event, setGrid) {
 
   // Null out stale replay/trace state so playback controls are inert during
   // loading, and so a thrown exception doesn't leave stale traceData behind.
-  replay.state = null;
-  replay.traceData = null;
+  state = null;
+  traceData = null;
 
   // Show the playback bar with loading progress — hide playback controls
-  // since they're inert during loading (replay.state is null).
+  // since they're inert during loading (state is null).
   els.playbackBar.classList.remove("hidden");
   els.playbackControls.classList.add("hidden");
   els.loadingBar.classList.remove("hidden");
-  els.loadingBar.querySelector(".loading-label").textContent = "Loading\u2026";
+  els.loadingLabel.textContent = "Loading\u2026";
   els.loadingFill.style.width = "0%";
   els.loadingPct.textContent = "0.0%";
 
@@ -681,49 +713,41 @@ export function handleTraceFile(event, setGrid) {
   worker.onmessage = (e) => {
     const msg = e.data;
 
-    if (msg.type === "progress") {
+    switch (msg.type) {
+    case "progress":
       if (myGen !== handleTraceGeneration) return;
       els.loadingFill.style.width = `${msg.pct}%`;
       els.loadingPct.textContent = `${msg.pct.toFixed(1)}%`;
       return;
-    }
-
-    if (msg.type === "merging") {
+    case "merging":
       if (myGen !== handleTraceGeneration) return;
-      els.loadingBar.querySelector(".loading-label").textContent = msg.step;
+      els.loadingLabel.textContent = msg.step;
       els.loadingFill.style.width = `${msg.pct}%`;
       els.loadingPct.textContent = `${msg.pct.toFixed(1)}%`;
       return;
-    }
-
-    if (msg.type === "transferring") {
+    case "transferring":
       if (myGen !== handleTraceGeneration) return;
-      els.loadingBar.querySelector(".loading-label").textContent = "Transferring\u2026";
+      els.loadingLabel.textContent = "Transferring\u2026";
       els.loadingFill.style.width = "100%";
       els.loadingPct.textContent = "";
       return;
-    }
-
-    if (msg.type === "error") {
+    case "error":
       worker.terminate(); activeWorker = null;
       if (myGen !== handleTraceGeneration) return;
       els.loadingBar.classList.add("hidden");
       els.playbackControls.classList.remove("hidden");
       els.cycleDisplay.textContent = `Error: ${msg.message}`;
       return;
-    }
-
-    if (msg.type === "done") {
+    case "done": {
       worker.terminate(); activeWorker = null;
       if (myGen !== handleTraceGeneration) return;
 
-      els.loadingBar.querySelector(".loading-label").textContent = "Building grid\u2026";
+      els.loadingLabel.textContent = "Building grid\u2026";
       els.loadingPct.textContent = "";
 
       // Reconstruct Maps from the transferred entry arrays
       const d = msg.data;
       const peStateIndex = new Map(d.peStateEntries);
-      const waveletIndex = new Map(d.waveletEntries);
 
       // Pre-compute grid row/col for each PE key to avoid
       // key.split(",").map(Number) on every reconstruction (~3650× per frame).
@@ -735,15 +759,17 @@ export function handleTraceFile(event, setGrid) {
       }
 
       // Pre-sort wavelets by first cycle for fast range filtering.
-      // At 512 Hz with 63K wavelets, iterating all of them per frame is too slow.
-      // Sorted by firstCycle, we binary-search to find the start of the active range.
       let waveletList = null;
       if (d.hasWaveletData) {
-        waveletList = [...waveletIndex.values()];
-        waveletList.sort((a, b) => a.hops.cycles[0] - b.hops.cycles[0]);
+        waveletList = d.waveletEntries.map(e => e[1]);
+        for (const wv of waveletList) {
+          wv.firstCycle = wv.hops.cycles[0];
+          wv.lastCycle = wv.hops.cycles[wv.hops.cycles.length - 1];
+        }
+        waveletList.sort((a, b) => a.firstCycle - b.firstCycle);
       }
 
-      const traceData = {
+      const td = {
         dimX: d.dimX,
         dimY: d.dimY,
         landingIndex: d.landingIndex,
@@ -763,30 +789,33 @@ export function handleTraceFile(event, setGrid) {
       els.loadingBar.classList.add("hidden");
       els.playbackControls.classList.remove("hidden");
 
-      if (traceData.dimX === 0 || traceData.dimY === 0 || traceData.minCycle > traceData.maxCycle) {
+      if (td.dimX === 0 || td.dimY === 0 || td.minCycle > td.maxCycle) {
         els.cycleDisplay.textContent = "Error: invalid trace file";
         els.playbackBar.classList.add("hidden");
         deselectPE();
-        replay.traceData = null;
         return;
       }
 
       deselectPE();
       lastReconstructedCycle = -1;
-      replay.traceData = traceData;
-      setGrid(traceData.dimY, traceData.dimX);
+      wavScanStart = 0;
+      traceData = td;
+      setGrid(td.dimY, td.dimX);
+      grid.showRamps = td.hasWaveletData;
       animationLoop.start();
       showPanel("trace");
       els.traceLog.innerHTML = "";
 
       const { minCycle, maxCycle } = traceData;
+      maxCycleStr = maxCycle.toLocaleString();
       const speed = 4;
       els.speedDisplay.textContent = `${speed} Hz`;
 
-      replay.state = {
+      state = {
         currentCycle: minCycle,
         speed,
         playing: false,
+        direction: 1, // +1 = forward, -1 = reverse
         lastTickTime: performance.now(),
         minCycle,
         maxCycle,
@@ -795,16 +824,17 @@ export function handleTraceFile(event, setGrid) {
       els.scrubBar.min = minCycle;
       els.scrubBar.max = maxCycle;
       els.scrubBar.value = minCycle;
-      els.playPauseBtn.textContent = "\u25B6";
+      updateTransportUI();
       updateScrubUI();
-    }
+    } // case "done"
+    } // switch
   };
 
   worker.postMessage({ file });
 }
 
 function handleTraceLogClick(e) {
-  if (!selectedPE || !replay.state) return;
+  if (!selectedPE || !state) return;
   const entry = e.target.closest(".trace-entry");
   if (!entry || !entry.dataset.cycle) return;
   seekToCycle(parseInt(entry.dataset.cycle, 10));
@@ -813,26 +843,23 @@ function handleTraceLogClick(e) {
 export function setupScrubListeners() {
   els.traceLog.addEventListener("click", handleTraceLogClick);
   els.scrubBar.addEventListener("pointerdown", () => {
-    if (!replay.state || isScrubbing) return;
+    if (!state || isScrubbing) return;
     isScrubbing = true;
-    scrubWasPlaying = replay.state.playing;
-    if (replay.state.playing) {
-      replay.state.playing = false;
-      els.playPauseBtn.textContent = "\u25B6";
-    }
+    scrubWasPlaying = state.playing;
+    state.playing = false;
     const onRelease = () => {
       window.removeEventListener("pointerup", onRelease);
       window.removeEventListener("pointercancel", onRelease);
       isScrubbing = false;
-      if (!replay.state || !scrubWasPlaying) return;
+      if (!state || !scrubWasPlaying) return;
       scrubWasPlaying = false;
-      resumePlayback();
+      startPlaying(state.direction);
     };
     window.addEventListener("pointerup", onRelease);
     window.addEventListener("pointercancel", onRelease);
   });
   els.scrubBar.addEventListener("input", (e) => {
-    if (!replay.state) return;
+    if (!state) return;
     seekToCycle(parseInt(e.target.value, 10));
   });
 

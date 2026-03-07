@@ -3,8 +3,35 @@ import { DataPacket } from "./packet.js";
 import {
   CELL_SIZE, GAP_SIZE, ARROW_DEPTH, RAMP_LATERAL, ARROW_SIZE,
   ZOOM_PREVIEW_COLOR, CORNER_LABEL_COLOR,
+  PE_COLOR_STALL_WAVELET, PE_COLOR_STALL_PIPE,
   RAMP_ON_ACTIVE, RAMP_ON_INACTIVE, RAMP_OFF_ACTIVE, RAMP_OFF_INACTIVE,
 } from "./constants.js";
+
+
+// Add a single active ramp triangle to the given Path2D.
+function _addRampTriangle(p, cx, cy, dir, isOn) {
+  const s = ARROW_SIZE;
+  let x, y;
+  switch (dir) {
+    case "E": x = cx + ARROW_DEPTH;
+      if (isOn) { y = cy + RAMP_LATERAL; p.moveTo(x - s, y); p.lineTo(x + s, y - s); p.lineTo(x + s, y + s); }
+      else      { y = cy - RAMP_LATERAL; p.moveTo(x + s, y); p.lineTo(x - s, y - s); p.lineTo(x - s, y + s); }
+      break;
+    case "N": y = cy + ARROW_DEPTH;
+      if (isOn) { x = cx + RAMP_LATERAL; p.moveTo(x, y - s); p.lineTo(x - s, y + s); p.lineTo(x + s, y + s); }
+      else      { x = cx - RAMP_LATERAL; p.moveTo(x, y + s); p.lineTo(x - s, y - s); p.lineTo(x + s, y - s); }
+      break;
+    case "W": x = cx - ARROW_DEPTH;
+      if (isOn) { y = cy - RAMP_LATERAL; p.moveTo(x + s, y); p.lineTo(x - s, y - s); p.lineTo(x - s, y + s); }
+      else      { y = cy + RAMP_LATERAL; p.moveTo(x - s, y); p.lineTo(x + s, y - s); p.lineTo(x + s, y + s); }
+      break;
+    case "S": y = cy - ARROW_DEPTH;
+      if (isOn) { x = cx - RAMP_LATERAL; p.moveTo(x, y + s); p.lineTo(x - s, y - s); p.lineTo(x + s, y - s); }
+      else      { x = cx + RAMP_LATERAL; p.moveTo(x, y - s); p.lineTo(x - s, y + s); p.lineTo(x + s, y + s); }
+      break;
+  }
+  p.closePath();
+}
 
 export class Grid {
   constructor(rows, cols) {
@@ -16,7 +43,9 @@ export class Grid {
     this.pendingTimers = new Set();
     this.viewport = null; // { minRow, maxRow, minCol, maxCol } or null for full grid
     this.zoomPreview = null; // { minRow, maxRow, minCol, maxCol } — highlight during drag
-    this._activeRamps = null; // cached Uint8Array for _collectActiveRamps
+    this.showRamps = false; // enabled only when trace has detailed wavelet routing data
+    this._staticRampPaths = null; // cached {offPath, onPath} for inactive ramps
+    this._cornerLabels = null;    // cached corner label data
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
         const x = col * (CELL_SIZE + GAP_SIZE) + GAP_SIZE;
@@ -33,10 +62,14 @@ export class Grid {
       minCol: Math.max(0, minCol),
       maxCol: Math.min(this.cols - 1, maxCol),
     };
+    this._cornerLabels = null;
+    this._staticRampPaths = null;
   }
 
   clearViewport() {
     this.viewport = null;
+    this._cornerLabels = null;
+    this._staticRampPaths = null;
   }
 
   // Returns the natural (logical) pixel size of the current viewport region.
@@ -94,17 +127,13 @@ export class Grid {
     for (const pe of this.pes) pe.activate();
   }
 
-  setPEBusy(row, col, busy, op, opEntry) {
-    const pe = this.getPE(row, col);
-    if (pe) pe.setBusy(busy, op, opEntry);
-  }
-
   setPEStall(row, col, stall, reason) {
     const pe = this.getPE(row, col);
     if (pe) {
       pe.stall = stall || null;
       pe.stallReason = reason || null;
-      if (stall) pe.brightness = Math.max(pe.brightness, 0.25);
+      // Stall color only shown when nothing is executing (op takes visual priority)
+      if (stall && !pe.op) pe.fillColor = stall === "wavelet" ? PE_COLOR_STALL_WAVELET : PE_COLOR_STALL_PIPE;
     }
   }
 
@@ -152,16 +181,14 @@ export class Grid {
     const v = this.viewport;
     const minR = v ? v.minRow : 0, maxR = v ? v.maxRow : this.rows - 1;
     const minC = v ? v.minCol : 0, maxC = v ? v.maxCol : this.cols - 1;
+
     for (let row = minR; row <= maxR; row++) {
       for (let col = minC; col <= maxC; col++) {
         this.pes[row * this.cols + col].draw(ctx);
       }
     }
-    this.drawRamps(ctx, minR, maxR, minC, maxC);
-    // Packets: let canvas clipping handle off-viewport ones (few packets, negligible cost)
+    if (this.showRamps) this.drawRamps(ctx, minR, maxR, minC, maxC);
     for (const packet of this.packets) packet.draw(ctx, now, this);
-
-    // Corner PE labels (e.g., "P0.0") — helps orient when zoomed in
     this._drawCornerLabels(ctx, minR, maxR, minC, maxC);
 
     // Draw zoom preview: tint each selected PE during Shift+drag
@@ -177,151 +204,116 @@ export class Grid {
     }
   }
 
-  drawRamps(ctx, minR, maxR, minC, maxC) {
-    // Collect active ramps from TracedPackets
-    const activeRamps = this._collectActiveRamps();
+  // Build static (inactive) ramp Path2D objects for all viewport PEs.
+  // Called once per viewport; cached until viewport changes.
+  // Reuses _addRampTriangle to keep triangle geometry in one place.
+  _buildStaticRampPaths(minR, maxR, minC, maxC) {
+    const offPath = new Path2D();
+    const onPath = new Path2D();
+    const cols = this.cols;
 
-    // activeRamps is a Uint8Array indexed by peIndex*8 + dirIdx*2 + isOn
-    // dirIdx: E=0, N=1, W=2, S=3; isOn: 0=off, 1=on
     for (let row = minR; row <= maxR; row++) {
       for (let col = minC; col <= maxC; col++) {
-        const pe = this.getPE(row, col);
-        if (!pe) continue;
+        const pe = this.pes[row * cols + col];
         const { cx, cy } = pe;
-        const base = (row * this.cols + col) * 8;
-
-        // E side (screen right): dirIdx=0
-        this._drawRamp(ctx, cx + ARROW_DEPTH, cy - RAMP_LATERAL, "E", false, activeRamps[base]);
-        this._drawRamp(ctx, cx + ARROW_DEPTH, cy + RAMP_LATERAL, "E", true, activeRamps[base + 1]);
-
-        // N side (screen down): dirIdx=1
-        this._drawRamp(ctx, cx - RAMP_LATERAL, cy + ARROW_DEPTH, "N", false, activeRamps[base + 2]);
-        this._drawRamp(ctx, cx + RAMP_LATERAL, cy + ARROW_DEPTH, "N", true, activeRamps[base + 3]);
-
-        // W side (screen left): dirIdx=2
-        this._drawRamp(ctx, cx - ARROW_DEPTH, cy + RAMP_LATERAL, "W", false, activeRamps[base + 4]);
-        this._drawRamp(ctx, cx - ARROW_DEPTH, cy - RAMP_LATERAL, "W", true, activeRamps[base + 5]);
-
-        // S side (screen up): dirIdx=3
-        this._drawRamp(ctx, cx + RAMP_LATERAL, cy - ARROW_DEPTH, "S", false, activeRamps[base + 6]);
-        this._drawRamp(ctx, cx - RAMP_LATERAL, cy - ARROW_DEPTH, "S", true, activeRamps[base + 7]);
+        for (const dir of ["E", "N", "W", "S"]) {
+          _addRampTriangle(offPath, cx, cy, dir, false);
+          _addRampTriangle(onPath, cx, cy, dir, true);
+        }
       }
     }
+
+    this._staticRampPaths = { offPath, onPath };
   }
 
-  _drawRamp(ctx, x, y, dir, isOnRamp, active) {
-    ctx.fillStyle = isOnRamp
-      ? (active ? RAMP_ON_ACTIVE : RAMP_ON_INACTIVE)
-      : (active ? RAMP_OFF_ACTIVE : RAMP_OFF_INACTIVE);
+  drawRamps(ctx, minR, maxR, minC, maxC) {
+    // Build static paths once per viewport
+    if (!this._staticRampPaths) this._buildStaticRampPaths(minR, maxR, minC, maxC);
 
-    let dx = 0, dy = 0;
-    switch (dir) {
-      case "E": dx = isOnRamp ? -1 : 1; break;
-      case "W": dx = isOnRamp ? 1 : -1; break;
-      case "N": dy = isOnRamp ? -1 : 1; break;
-      case "S": dy = isOnRamp ? 1 : -1; break;
-    }
+    // Draw all ramps in inactive style first
+    ctx.fillStyle = RAMP_OFF_INACTIVE;
+    ctx.fill(this._staticRampPaths.offPath);
+    ctx.fillStyle = RAMP_ON_INACTIVE;
+    ctx.fill(this._staticRampPaths.onPath);
 
-    ctx.beginPath();
-    if (dx !== 0) {
-      ctx.moveTo(x + dx * ARROW_SIZE, y);
-      ctx.lineTo(x - dx * ARROW_SIZE, y - ARROW_SIZE);
-      ctx.lineTo(x - dx * ARROW_SIZE, y + ARROW_SIZE);
-    } else {
-      ctx.moveTo(x, y + dy * ARROW_SIZE);
-      ctx.lineTo(x - ARROW_SIZE, y - dy * ARROW_SIZE);
-      ctx.lineTo(x + ARROW_SIZE, y - dy * ARROW_SIZE);
-    }
-    ctx.closePath();
-    ctx.fill();
-  }
+    if (this.packets.length === 0) return;
 
-  // Ramp direction encoding for the active ramps Uint8Array.
-  // Each PE has 8 slots: 4 directions × (off-ramp, on-ramp).
-  // Index = peIndex * 8 + dirIdx * 2 + isOn
-  static _dirIdx = { E: 0, N: 1, W: 2, S: 3 };
+    // Overlay active ramps (only the few that are currently active)
+    const cols = this.cols;
+    const rows = this.rows;
+    const pes = this.pes;
+    const offActive = new Path2D();
+    const onActive = new Path2D();
+    let hasOff = false, hasOn = false;
 
-  _collectActiveRamps() {
-    // Returns a Uint8Array where a nonzero value means the ramp is active.
-    // Indexed by (row*cols + col) * 8 + dirIdx * 2 + isOn.
-    const size = this.rows * this.cols * 8;
-    if (!this._activeRamps || this._activeRamps.length !== size) {
-      this._activeRamps = new Uint8Array(size);
-    }
-    const active = this._activeRamps;
-    active.fill(0);
-    const dirIdx = Grid._dirIdx;
+    // Helper: convert trace (x,y) to grid PE, add ramp triangle
+    const addActive = (path, trX, trY, dimY, dir, isOn) => {
+      const r = dimY - 1 - trY, c = trX;
+      if (r >= 0 && r < rows && c >= 0 && c < cols) {
+        const pe = pes[r * cols + c];
+        _addRampTriangle(path, pe.cx, pe.cy, dir, isOn);
+        return true;
+      }
+      return false;
+    };
+
     for (const pkt of this.packets) {
       if (!pkt.waypoints || !pkt.visible) continue;
-
-      const wp = pkt.waypoints;
+      const wpI = pkt.wpIdx;
+      const cur = pkt.waypoints[wpI];
       const fc = pkt.fractionalCycle;
-      let wpI = 0;
-      for (let i = 1; i < wp.length; i++) {
-        if (wp[i].cycle > fc) break;
-        wpI = i;
-      }
-
-      const cur = wp[wpI];
       const depCycle = cur.depCycle;
-      const row = pkt.dimY - 1 - cur.y;
-      const col = cur.x;
-      const inBounds = row >= 0 && row < this.rows && col >= 0 && col < this.cols;
+      const dimY = pkt.dimY;
 
       if (depCycle !== null && fc < depCycle) {
-        if (inBounds) {
-          const base = (row * this.cols + col) * 8;
-          if (cur.arriveDir && cur.arriveDir !== "R") active[base + dirIdx[cur.arriveDir] * 2 + 1] = 1;
-          if (cur.departDir) active[base + dirIdx[cur.departDir] * 2] = 1;
-        }
-      } else if (depCycle !== null && wpI < wp.length - 1) {
-        if (inBounds && cur.departDir) {
-          active[(row * this.cols + col) * 8 + dirIdx[cur.departDir] * 2] = 1;
-        }
-        const next = wp[wpI + 1];
-        const nRow = pkt.dimY - 1 - next.y;
-        const nCol = next.x;
-        if (nRow >= 0 && nRow < this.rows && nCol >= 0 && nCol < this.cols) {
-          if (next.arriveDir && next.arriveDir !== "R") {
-            active[(nRow * this.cols + nCol) * 8 + dirIdx[next.arriveDir] * 2 + 1] = 1;
-          }
-        }
+        // Wavelet is at current PE waiting for departure.
+        // Design intent: the destination off-ramp lights up at the start of
+        // the departure cycle, while the packet is still visually at the
+        // on-ramp. This previews the wavelet's intended next direction.
+        if (cur.arriveDir && cur.arriveDir !== "R")
+          hasOn = addActive(onActive, cur.x, cur.y, dimY, cur.arriveDir, true) || hasOn;
+        if (cur.departDir)
+          hasOff = addActive(offActive, cur.x, cur.y, dimY, cur.departDir, false) || hasOff;
+      } else if (depCycle !== null && wpI < pkt.waypoints.length - 1) {
+        if (cur.departDir)
+          hasOff = addActive(offActive, cur.x, cur.y, dimY, cur.departDir, false) || hasOff;
+        const next = pkt.waypoints[wpI + 1];
+        if (next.arriveDir && next.arriveDir !== "R")
+          hasOn = addActive(onActive, next.x, next.y, dimY, next.arriveDir, true) || hasOn;
       } else {
-        if (inBounds && cur.arriveDir && cur.arriveDir !== "R") {
-          active[(row * this.cols + col) * 8 + dirIdx[cur.arriveDir] * 2 + 1] = 1;
-        }
+        if (cur.arriveDir && cur.arriveDir !== "R")
+          hasOn = addActive(onActive, cur.x, cur.y, dimY, cur.arriveDir, true) || hasOn;
       }
     }
-    return active;
+
+    if (hasOff) { ctx.fillStyle = RAMP_OFF_ACTIVE; ctx.fill(offActive); }
+    if (hasOn)  { ctx.fillStyle = RAMP_ON_ACTIVE; ctx.fill(onActive); }
   }
 
   _drawCornerLabels(ctx, minR, maxR, minC, maxC) {
-    const fontSize = Math.min(GAP_SIZE * 0.7, 6);
-    if (fontSize < 2) return; // too small to read
-    ctx.font = `${fontSize}px sans-serif`;
+    if (!this._cornerLabels) {
+      const fontSize = Math.min(GAP_SIZE * 0.7, 6);
+      if (fontSize < 2) { this._cornerLabels = []; return; }
+      const step = CELL_SIZE + GAP_SIZE;
+      const g = GAP_SIZE;
+      const left = minC * step + g / 2;
+      const right = maxC * step + g + CELL_SIZE + g / 2;
+      const top = minR * step + g / 2;
+      const bottom = maxR * step + g + CELL_SIZE + g / 2;
+      this._cornerLabels = [
+        { label: `P${minC}.${this.rows - 1 - minR}`, x: left,  y: top,    align: "left",  baseline: "top",    fontSize },
+        { label: `P${maxC}.${this.rows - 1 - minR}`, x: right, y: top,    align: "right", baseline: "top",    fontSize },
+        { label: `P${minC}.${this.rows - 1 - maxR}`, x: left,  y: bottom, align: "left",  baseline: "bottom", fontSize },
+        { label: `P${maxC}.${this.rows - 1 - maxR}`, x: right, y: bottom, align: "right", baseline: "bottom", fontSize },
+      ];
+    }
+    if (this._cornerLabels.length === 0) return;
+    ctx.font = `${this._cornerLabels[0].fontSize}px sans-serif`;
     ctx.fillStyle = CORNER_LABEL_COLOR;
-
-    const step = CELL_SIZE + GAP_SIZE;
-    const g = GAP_SIZE;
-    // Position labels in the margin outside the PE bounding box.
-    // The viewport includes a gap-width margin on all sides.
-    const left = minC * step + g / 2;
-    const right = maxC * step + g + CELL_SIZE + g / 2;
-    const top = minR * step + g / 2;
-    const bottom = maxR * step + g + CELL_SIZE + g / 2;
-
-    const corners = [
-      [minR, minC, left,  top,    "left",  "top"],
-      [minR, maxC, right, top,    "right", "top"],
-      [maxR, minC, left,  bottom, "left",  "bottom"],
-      [maxR, maxC, right, bottom, "right", "bottom"],
-    ];
-
-    for (const [row, col, x, y, align, baseline] of corners) {
-      const label = `P${col}.${this.rows - 1 - row}`;
-      ctx.textAlign = align;
-      ctx.textBaseline = baseline;
-      ctx.fillText(label, x, y);
+    for (const c of this._cornerLabels) {
+      ctx.textAlign = c.align;
+      ctx.textBaseline = c.baseline;
+      ctx.fillText(c.label, c.x, c.y);
     }
   }
 

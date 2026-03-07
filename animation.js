@@ -14,6 +14,7 @@ export class AnimationLoop {
   }
 
   stop() {
+    if (!this.running) return;
     this.running = false;
     cancelAnimationFrame(this.rafId);
     this.rafId = 0;

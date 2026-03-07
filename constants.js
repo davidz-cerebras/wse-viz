@@ -25,6 +25,8 @@ export const PE_COLOR_FP_ARITH = "rgb(50, 185, 75)";           // deep green
 export const PE_COLOR_INT_ARITH = "rgb(150, 220, 50)";         // yellow-green
 export const PE_COLOR_CTRL = "rgb(240, 240, 170)";             // cool light yellow
 export const PE_COLOR_TASK = "rgb(180, 180, 190)";             // light grey
+export const PE_COLOR_MEM_READ = "rgb(230, 140, 190)";          // pink-lavender
+export const PE_COLOR_MEM_WRITE = "rgb(245, 170, 115)";         // reddish-orange
 export const PE_COLOR_STALL_WAVELET = "rgba(74, 25, 98, 0.5)"; // purple tint
 export const PE_COLOR_STALL_PIPE = "rgba(95, 38, 25, 0.5)";    // reddish-brown tint
 export const PE_SELECT_COLOR = "#ff9800";                      // selection border
@@ -32,8 +34,8 @@ export const PE_SELECT_COLOR = "#ff9800";                      // selection bord
 // PE text colors
 export const PE_TEXT_DEFAULT = "white";
 export const PE_TEXT_DEFAULT_SUB = "rgba(255, 255, 255, 0.85)";
-export const PE_TEXT_CTRL = "rgb(160, 120, 30)"; // dark amber
-export const PE_TEXT_CTRL_SUB = "rgba(160, 120, 30, 0.7)";
+export const PE_TEXT_CTRL = "rgb(190, 120, 20)"; // orange-amber
+export const PE_TEXT_CTRL_SUB = "rgba(190, 120, 20, 0.7)";
 export const PE_TEXT_TASK = "rgb(70, 70, 80)"; // dark grey
 export const PE_TEXT_TASK_SUB = "rgba(70, 70, 80, 0.7)";
 export const PE_STALL_TEXT_WAVELET = "rgba(200, 180, 220, 0.7)"; // lavender label
@@ -47,7 +49,11 @@ export const RAMP_ON_INACTIVE = "rgba(100, 181, 246, 0.15)";
 export const RAMP_OFF_ACTIVE = "rgba(255, 152, 0, 0.9)";
 export const RAMP_OFF_INACTIVE = "rgba(255, 152, 0, 0.15)";
 
-// Replay tuning
-export const MAX_LOG_ENTRIES = 500;
-export const PE_TRACE_WINDOW = 500; // max DOM entries rendered at once
+// Demo timing (used by pe.js, packet.js, and demo.js)
+export const DEMO_HOP_DELAY = 100;
+export const DEMO_PE_ON_DURATION = 200;
+export const DEMO_PE_BRIGHTEN_DURATION = 25;
+export const DEMO_PE_DIM_DURATION = 500;
 
+// Replay tuning
+export const PE_TRACE_WINDOW = 500; // max DOM entries rendered at once

@@ -1,6 +1,6 @@
 // Demo-only constants, algorithms, and UI glue.
 
-import { CELL_SIZE } from "./constants.js";
+import { CELL_SIZE, DEMO_HOP_DELAY } from "./constants.js";
 import { drawPacketDot } from "./draw-utils.js";
 
 let grid, els, animationLoop, cancelReplay, showPanel, setGrid;
@@ -22,11 +22,7 @@ export function setDemoGrid(g) {
 
 export const GRID_ROWS = 32;
 export const GRID_COLS = 32;
-export const DEMO_HOP_DELAY = 100;
 const DEMO_STEP_DELAY = 150;
-export const DEMO_PE_ON_DURATION = 200;
-export const DEMO_PE_BRIGHTEN_DURATION = 25;
-export const DEMO_PE_DIM_DURATION = 500;
 
 // --- MultiHopPacket (used only by SpMV demo) ---
 
@@ -142,6 +138,8 @@ function allReduceVerticalPhase(grid, phase) {
 
 function circularExchange(grid) {
   const { centerCol1, centerCol2, centerRow1, centerRow2 } = gridCenter(grid);
+  // On odd-dimension grids all four centers collapse to the same PE — skip
+  if (centerRow1 === centerRow2 && centerCol1 === centerCol2) return;
   grid.activatePE(centerRow1, centerCol1);
   grid.activatePE(centerRow1, centerCol2);
   grid.activatePE(centerRow2, centerCol1);

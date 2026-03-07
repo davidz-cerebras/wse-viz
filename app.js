@@ -8,10 +8,13 @@ import {
 } from "./demo.js";
 import {
   initReplay, setReplayGrid, getReplayState, getIsScrubbing,
-  updateReplayTick, togglePlayback, adjustSpeed, stepCycle,
+  updateReplayTick, transportFwdPlay, transportRevPlay, transportPause,
+  transportStepFwd, transportStepBack, adjustSpeed,
   cancelReplay, handleTraceFile, setupScrubListeners,
   selectPE, deselectPE,
 } from "./replay-controller.js";
+import { setOpBitmapScale } from "./pe.js";
+import { setLabelBitmapScale } from "./draw-utils.js";
 import { CELL_SIZE, GAP_SIZE } from "./constants.js";
 
 let grid;
@@ -36,7 +39,11 @@ function init() {
 
   els = {
     scrubBar: document.getElementById("scrubBar"),
-    playPauseBtn: document.getElementById("playPauseBtn"),
+    revPlayBtn: document.getElementById("revPlayBtn"),
+    stepBackBtn: document.getElementById("stepBackBtn"),
+    pauseBtn: document.getElementById("pauseBtn"),
+    stepFwdBtn: document.getElementById("stepFwdBtn"),
+    fwdPlayBtn: document.getElementById("fwdPlayBtn"),
     speedDisplay: document.getElementById("speedDisplay"),
     cycleDisplay: document.getElementById("cycleDisplay"),
     traceLog: document.getElementById("traceLog"),
@@ -54,18 +61,19 @@ function init() {
     loadingBar: document.getElementById("loadingBar"),
     loadingFill: document.getElementById("loadingFill"),
     loadingPct: document.getElementById("loadingPct"),
+    loadingLabel: document.querySelector("#loadingBar .loading-label"),
     playbackControls: document.getElementById("playbackControls"),
   };
 
   setGrid(GRID_ROWS, GRID_COLS);
   animationLoop = new AnimationLoop(update, draw);
-  initReplay({ grid, els, animationLoop, showPanel });
+  initReplay({ grid, els, animationLoop, showPanel, resizeCanvas });
   initDemo({ grid, els, animationLoop, cancelReplay, showPanel, setGrid });
   setupEventListeners();
 }
 
 function update(timestamp) {
-  grid.update(timestamp);
+  if (!getReplayState()) grid.update(timestamp);
   updateReplayTick(timestamp);
 
   // Auto-stop when truly idle: no simulation, no replay loaded, no visual activity
@@ -75,16 +83,23 @@ function update(timestamp) {
 }
 
 function draw(timestamp) {
-  // Clear in device coordinates to avoid sub-pixel rounding gaps at edges
-  ctx.save();
+  // Clear in device coordinates, then restore the grid transform
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.restore();
+  const dpr = window.devicePixelRatio || 1;
+  const s = canvasScale * dpr;
+  ctx.setTransform(s, 0, 0, s, -viewportOffsetX * s, -viewportOffsetY * s);
   grid.draw(ctx, timestamp);
+}
+
+function watchDPR() {
+  const mq = matchMedia(`(resolution: ${devicePixelRatio}dppx)`);
+  mq.addEventListener("change", () => { resizeCanvas(); watchDPR(); }, { once: true });
 }
 
 function setupEventListeners() {
   window.addEventListener("resize", resizeCanvas);
+  watchDPR();
   document.getElementById("startBtn").addEventListener("click", startSimulation);
   document.getElementById("allReduceFullBtn").addEventListener("click", startAllReduceFull);
   document.getElementById("spmvBtn").addEventListener("click", startSpMV);
@@ -100,24 +115,28 @@ function setupEventListeners() {
   els.undoZoomBtn.addEventListener("click", undoZoom);
   els.resetZoomBtn.addEventListener("click", resetZoom);
   setupScrubListeners();
-  els.playPauseBtn.addEventListener("click", togglePlayback);
+  els.revPlayBtn.addEventListener("click", transportRevPlay);
+  els.stepBackBtn.addEventListener("click", transportStepBack);
+  els.pauseBtn.addEventListener("click", transportPause);
+  els.stepFwdBtn.addEventListener("click", transportStepFwd);
+  els.fwdPlayBtn.addEventListener("click", transportFwdPlay);
   document.getElementById("speedDown").addEventListener("click", () => adjustSpeed(0.5));
   document.getElementById("speedUp").addEventListener("click", () => adjustSpeed(2));
   document.addEventListener("keydown", (e) => {
     if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
     if (e.code === "Space") {
       e.preventDefault();
-      if (!getIsScrubbing()) togglePlayback();
+      if (!getIsScrubbing()) transportPause();
     } else if (e.key === "q") {
       if (grid && grid.viewport) undoZoom();
     } else if (e.key === "Escape") {
       if (grid && grid.viewport) resetZoom();
     } else if (e.key === "ArrowRight") {
       e.preventDefault();
-      stepCycle(1);
+      transportStepFwd();
     } else if (e.key === "ArrowLeft") {
       e.preventDefault();
-      stepCycle(-1);
+      transportStepBack();
     } else if (e.key === "]") {
       adjustSpeed(2);
     } else if (e.key === "[") {
@@ -152,14 +171,9 @@ function eventToCanvasCSS(e) {
 }
 
 function cssToLogical(cssX, cssY) {
-  // Convert canvas-relative CSS pixel position to full-grid logical coords
-  const rect = canvas.getBoundingClientRect();
-  const border = parseFloat(getComputedStyle(canvas).borderWidth) || 0;
-  const innerW = rect.width - 2 * border;
-  const innerH = rect.height - 2 * border;
   return {
-    x: (cssX / innerW) * gridNaturalWidth + viewportOffsetX,
-    y: (cssY / innerH) * gridNaturalHeight + viewportOffsetY,
+    x: cssX / canvasScale + viewportOffsetX,
+    y: cssY / canvasScale + viewportOffsetY,
   };
 }
 
@@ -240,6 +254,8 @@ function handleZoomDragStart(e) {
     overlay.classList.add("hidden");
     grid.zoomPreview = null;
     suppressNextClick = true;
+    // Auto-reset after one frame in case the click lands outside the canvas
+    requestAnimationFrame(() => { suppressNextClick = false; });
 
     if (!zoomDrag) return;
     const endCss = eventToCanvasCSS(ev);
@@ -317,7 +333,8 @@ function applyViewport() {
 
 function showPanel(panel) {
   els.cgPanel.classList.toggle("hidden", panel !== "cg");
-  els.tracePanel.classList.toggle("hidden", panel !== "trace");
+  // Trace panel is shown/hidden by selectPE/deselectPE, not by showPanel
+  if (panel !== "trace") els.tracePanel.classList.add("hidden");
   els.playbackBar.classList.toggle("hidden", panel !== "trace");
   // Refit canvas after panel visibility changes the available space
   requestAnimationFrame(resizeCanvas);
@@ -363,8 +380,9 @@ function setGrid(rows, cols) {
   viewportOffsetY = 0;
   els.undoZoomBtn.classList.add("hidden");
   els.resetZoomBtn.classList.add("hidden");
-  gridNaturalWidth = cols * (CELL_SIZE + GAP_SIZE) + GAP_SIZE;
-  gridNaturalHeight = rows * (CELL_SIZE + GAP_SIZE) + GAP_SIZE;
+  const vp = grid.getViewportNaturalSize();
+  gridNaturalWidth = vp.width;
+  gridNaturalHeight = vp.height;
   resizeCanvas();
 }
 
@@ -389,18 +407,24 @@ function resizeCanvas() {
 
   const newW = Math.round(displayW);
   const newH = Math.round(displayH);
+  const dpr = window.devicePixelRatio || 1;
 
   // Re-apply if the canvas pixel dimensions changed OR the scale changed
   // (same-aspect-ratio grid transitions produce identical pixel dimensions
   // but need a different transform scale for the new gridNaturalWidth).
   const newScale = displayW / gridNaturalWidth;
-  if (canvas.width !== newW || canvas.height !== newH || canvasScale !== newScale) {
+  const bufW = Math.round(newW * dpr);
+  const bufH = Math.round(newH * dpr);
+  if (canvas.width !== bufW || canvas.height !== bufH || canvasScale !== newScale) {
     canvasScale = newScale;
-    canvas.width = newW;
-    canvas.height = newH;
+    canvas.width = bufW;
+    canvas.height = bufH;
     canvas.style.width = `${newW}px`;
     canvas.style.height = `${newH}px`;
-    ctx.setTransform(canvasScale, 0, 0, canvasScale, -viewportOffsetX * canvasScale, -viewportOffsetY * canvasScale);
+    const s = canvasScale * dpr;
+    setOpBitmapScale(s);
+    setLabelBitmapScale(s);
+    ctx.setTransform(s, 0, 0, s, -viewportOffsetX * s, -viewportOffsetY * s);
     // Draw immediately so the canvas is never left blank after resize.
     // Can't rely on the animation loop because update() may auto-stop
     // before draw() runs if there's no active simulation or replay.

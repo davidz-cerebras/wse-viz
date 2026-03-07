@@ -14,11 +14,11 @@ const DIR_OPPOSITE = { E: "W", W: "E", N: "S", S: "N" };
  */
 export function extractBranches(wavelet) {
   const { hops } = wavelet;
-  if (hops.length === 0) return [];
+  if (hops.cycles.length === 0) return [];
 
   // Decode typed arrays into lightweight objects for the hopsByPos Map
   const hopsByPos = new Map();
-  for (let i = 0; i < hops.length; i++) {
+  for (let i = 0; i < hops.cycles.length; i++) {
     const hop = {
       cycle: hops.cycles[i],
       x: hops.xs[i],
@@ -227,30 +227,38 @@ export class TracedPacket {
     this.startCycle = waypoints[0].cycle;
     this.endCycle = waypoints[waypoints.length - 1].cycle;
     this.fractionalCycle = this.startCycle;
+    this.wpIdx = 0;     // cached waypoint index, updated by syncTo
     this.done = false;
     this.visible = false;
   }
 
-  setCycle(cycle) {
+  /** Update cycle state and fractional position in one call. */
+  syncTo(cycle, fc) {
     this.done = cycle > this.endCycle;
     this.visible = cycle >= this.startCycle;
-  }
-
-  /** Set a fractional cycle for smooth sub-cycle animation */
-  setFractionalCycle(fc) {
     this.fractionalCycle = fc;
+    // Update cached waypoint index, starting from previous position for
+    // amortized O(1) during forward playback. Falls back to scanning
+    // backward for seeks.
+    const wp = this.waypoints;
+    let idx = this.wpIdx;
+    if (idx < wp.length && wp[idx].cycle <= fc) {
+      // Forward: advance from current position
+      while (idx + 1 < wp.length && wp[idx + 1].cycle <= fc) idx++;
+    } else {
+      // Backward seek: scan from start
+      idx = 0;
+      for (let i = 1; i < wp.length; i++) {
+        if (wp[i].cycle > fc) break;
+        idx = i;
+      }
+    }
+    this.wpIdx = idx;
   }
 
   getCurrentPosition(_currentTime, grid) {
     const fc = this.fractionalCycle;
-
-    // Find which waypoint we're at or between
-    let wpIdx = 0;
-    for (let i = 1; i < this.waypoints.length; i++) {
-      if (this.waypoints[i].cycle > fc) break;
-      wpIdx = i;
-    }
-
+    const wpIdx = this.wpIdx;
     const wp = this.waypoints[wpIdx];
     const nextWp = wpIdx < this.waypoints.length - 1 ? this.waypoints[wpIdx + 1] : null;
     const depCycle = wp.depCycle;

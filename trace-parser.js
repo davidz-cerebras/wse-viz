@@ -54,7 +54,7 @@ function parseLanding(line) {
     x: parseInt(m[2]),
     y: parseInt(m[3]),
     color: parseInt(m[4]),
-    dirEncoded: LANDING_ENCODE[m[5]] ?? 0,
+    dirEncoded: LANDING_ENCODE[m[5]],
   };
 }
 
@@ -87,7 +87,7 @@ function parseWavelet(line) {
     color: parseInt(m[4]),
     ctrl: m[5] === "1",
     ident: flatStr(m[6]),
-    landingEncoded: LANDING_ENCODE[m[7]] ?? 5, // encode immediately to avoid JSC rope retention
+    landingEncoded: LANDING_ENCODE[m[7]], // encode immediately to avoid JSC rope retention
     departingEncoded,
     lf: line.includes(", lf=1"),
     consumed: line.includes("to_ce_from_q") || line.includes("to_ce_from_router") ||
@@ -217,7 +217,7 @@ export class TraceParser {
           if (cycle < minCycle) minCycle = cycle;
         }
       }
-      if (dimX === 0) {
+      if (isFirst && dimX === 0) {
         const dimMatch = line.match(dimRegex);
         if (dimMatch) { dimX = parseInt(dimMatch[1]); dimY = parseInt(dimMatch[2]); return; }
       }
@@ -245,9 +245,9 @@ export class TraceParser {
           const om = after.match(opcodeRegex);
           const pred = om ? (om[1] || null) : null;
           const op = om ? om[2] : null;
-          const state = `1:${pred || ""}:${op || ""}`;
-          if (prevExState.get(key) !== state) {
-            prevExState.set(key, state);
+          const exState = flatStr(`1:${pred || ""}:${op || ""}`);
+          if (prevExState.get(key) !== exState) {
+            prevExState.set(key, exState);
             const pe = getPEEntry(key);
             pe.cycles.push(+line.substring(1, sp1)); pe.busy.push(1);
             pe.opIds.push(internOp(op)); pe.predIds.push(internPred(pred));
@@ -489,6 +489,8 @@ export class TraceParser {
     for (let si = 0; si < nSeg; si++) {
       mp("Merging wavelets\u2026", 35 + (si / nSeg) * 15);
       const seg = segments[si];
+      // Free PE state data from this segment to reduce peak memory
+      seg.peStateTemp = null;
       for (const [ident, entry] of seg.waveletTemp) {
         if (!mergedWav.has(ident)) {
           mergedWav.set(ident, { ident: entry.ident, color: entry.color, ctrl: entry.ctrl, lf: entry.lf,
@@ -512,7 +514,9 @@ export class TraceParser {
     mp("Merging landings\u2026", 85);
     // 5. Merge and compact landings
     const allLandCycles = [], allLandXs = [], allLandYs = [], allLandColors = [], allLandDirs = [];
-    for (const seg of segments) {
+    for (let si = 0; si < segments.length; si++) {
+      const seg = segments[si];
+      seg.waveletTemp = null; // free wavelet data for earlier GC
       for (let i = 0; i < seg.tmpLandCycles.length; i++) {
         allLandCycles.push(seg.tmpLandCycles[i]);
         allLandXs.push(seg.tmpLandXs[i]);
@@ -587,7 +591,7 @@ export class TraceParser {
 
     const lXs = new Uint16Array(totalLandings);
     const lYs = new Uint16Array(totalLandings);
-    const lColors = new Uint16Array(totalLandings);
+    const lColors = new Uint8Array(totalLandings);
     const lDirs = new Uint8Array(totalLandings);
     const lCyclesFlat = new Float64Array(totalLandings);
     for (let i = 0; i < totalLandings; i++) {
@@ -620,8 +624,7 @@ export class TraceParser {
     };
   }
 
-  static findCycleIndexLE(cycleIndex, cycle) {
-    const { cycles, length } = cycleIndex;
+  static findCycleIndexLE(cycles, length, cycle) {
     let lo = 0;
     let hi = length - 1;
     let found = -1;

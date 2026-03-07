@@ -2,9 +2,11 @@
 // parsing, merges results, and sends the final compacted trace data to the
 // main thread. Falls back to single-threaded parsing for small files.
 //
-// Protocol (same as before — transparent to replay-controller.js):
+// Protocol:
 //   Main → Worker: { file: File }
 //   Worker → Main: { type: 'progress', pct: number }
+//   Worker → Main: { type: 'merging', step: string, pct: number }
+//   Worker → Main: { type: 'transferring' }
 //   Worker → Main: { type: 'done', data: traceData }
 //   Worker → Main: { type: 'error', message: string }
 
