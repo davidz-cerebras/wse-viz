@@ -212,7 +212,6 @@ canvas {
   width: 0%;
   background: var(--color-highlight);
   border-radius: 3px;
-  transition: width 0.15s ease;
 }
 
 .loading-pct {
