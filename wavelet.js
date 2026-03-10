@@ -126,6 +126,7 @@ export function extractBranches(wavelet) {
       // at this PE, create a short branch that terminates here (the CE delivery).
       // The dot visually forks: one continues to the next PE, one stays here.
       // Check the arrival cycle at this PE (consumePeWp.cycle), not the departure cycle
+      if (waypoints.length < 2) continue;
       const arrivalCycle = waypoints[waypoints.length - 2].cycle;
       if (followed && isConsumedWithDepartures(arrivalCycle, fromX, fromY)) {
         const consumePeWp = waypoints[waypoints.length - 2];

@@ -13,7 +13,7 @@ import {
   cancelReplay, handleTraceFile, setupScrubListeners,
   selectPE, deselectPE,
 } from "./replay-controller.js";
-import { setOpBitmapScale } from "./pe.js";
+import { setOpBitmapScale, setCatEnabled } from "./pe.js";
 import { setLabelBitmapScale } from "./draw-utils.js";
 import { CELL_SIZE, GAP_SIZE } from "./constants.js";
 
@@ -102,6 +102,43 @@ function watchDPR() {
 function setupEventListeners() {
   window.addEventListener("resize", resizeCanvas);
   watchDPR();
+  // Sidebar toggle
+  const headerEl = document.querySelector("header");
+  document.documentElement.style.setProperty("--header-height", headerEl.offsetHeight + "px");
+  const sidebarBtn = document.getElementById("sidebarBtn");
+  const sidebar = document.getElementById("sidebar");
+  const playbackBar = document.getElementById("playbackBar");
+  function updateSidebarBounds() {
+    const pbH = playbackBar.classList.contains("hidden") ? 0 : playbackBar.offsetHeight;
+    document.documentElement.style.setProperty("--playback-height", pbH + "px");
+  }
+  new MutationObserver(updateSidebarBounds).observe(playbackBar, { attributes: true, attributeFilter: ["class"] });
+  sidebarBtn.addEventListener("click", () => {
+    updateSidebarBounds();
+    sidebar.classList.toggle("open");
+  });
+  document.addEventListener("click", (e) => {
+    if (!sidebar.contains(e.target) && e.target !== sidebarBtn) {
+      sidebar.classList.remove("open");
+    }
+  });
+
+  // Category coloring checkboxes
+  const catCheckboxes = [
+    ["colorFpArith", "fp-arith"],
+    ["colorIntArith", "int-arith"],
+    ["colorCtrl", "ctrl"],
+    ["colorTask", "task"],
+    ["colorMemRead", "mem-read"],
+    ["colorMemWrite", "mem-write"],
+  ];
+  for (const [id, cat] of catCheckboxes) {
+    document.getElementById(id).addEventListener("change", (e) => {
+      setCatEnabled(cat, e.target.checked);
+      if (grid) grid.refreshPEColors();
+    });
+  }
+
   document.getElementById("startBtn").addEventListener("click", startSimulation);
   document.getElementById("allReduceFullBtn").addEventListener("click", startAllReduceFull);
   document.getElementById("spmvBtn").addEventListener("click", startSpMV);
@@ -203,6 +240,7 @@ function logicalRectToPERange(x0, y0, x1, y1) {
 function handleZoomDragStart(e) {
   if (!e.shiftKey || e.button !== 0) return;
   e.preventDefault();
+  suppressNextClick = false; // clear stale flag from any previous drag
 
   const containerPos = eventToContainerPos(e);
   const canvasPos = eventToCanvasCSS(e);
@@ -219,9 +257,15 @@ function handleZoomDragStart(e) {
   // Clear any previous zoom highlight
   grid.zoomPreview = null;
 
+  // Cache rects at drag start to avoid getBoundingClientRect() on every pointermove
+  const containerRect = canvas.parentElement.getBoundingClientRect();
+  const canvasRect = canvas.getBoundingClientRect();
+  const evtToContainer = (ev) => ({ x: ev.clientX - containerRect.left, y: ev.clientY - containerRect.top });
+  const evtToCanvasCSS = (ev) => ({ x: ev.clientX - canvasRect.left - canvasBorder, y: ev.clientY - canvasRect.top - canvasBorder });
+
   const onMove = (ev) => {
     if (!zoomDrag) return;
-    const cur = eventToContainerPos(ev);
+    const cur = evtToContainer(ev);
     const x = Math.min(zoomDrag.startContX, cur.x);
     const y = Math.min(zoomDrag.startContY, cur.y);
     const w = Math.abs(cur.x - zoomDrag.startContX);
@@ -232,7 +276,7 @@ function handleZoomDragStart(e) {
     overlay.style.height = `${h}px`;
 
     // Compute which PEs have their cell under the selection and highlight them
-    const curCss = eventToCanvasCSS(ev);
+    const curCss = evtToCanvasCSS(ev);
     const lo = cssToLogical(Math.min(zoomDrag.startCssX, curCss.x), Math.min(zoomDrag.startCssY, curCss.y));
     const hi = cssToLogical(Math.max(zoomDrag.startCssX, curCss.x), Math.max(zoomDrag.startCssY, curCss.y));
     const range = logicalRectToPERange(lo.x, lo.y, hi.x, hi.y);
@@ -255,24 +299,22 @@ function handleZoomDragStart(e) {
     overlay.classList.add("hidden");
     grid.zoomPreview = null;
     suppressNextClick = true;
-    // Auto-reset after one frame in case the click lands outside the canvas
-    requestAnimationFrame(() => { suppressNextClick = false; });
 
     if (!zoomDrag) return;
-    const endCss = eventToCanvasCSS(ev);
+    const endCss = evtToCanvasCSS(ev);
     const lo = cssToLogical(Math.min(zoomDrag.startCssX, endCss.x), Math.min(zoomDrag.startCssY, endCss.y));
     const hi = cssToLogical(Math.max(zoomDrag.startCssX, endCss.x), Math.max(zoomDrag.startCssY, endCss.y));
     const range = logicalRectToPERange(lo.x, lo.y, hi.x, hi.y);
     zoomDrag = null;
 
-    // setViewport clamps to grid bounds; pre-clamp here only for the size check
-    const minRow = Math.max(0, range.minRow);
-    const maxRow = Math.min(grid.rows - 1, range.maxRow);
-    const minCol = Math.max(0, range.minCol);
-    const maxCol = Math.min(grid.cols - 1, range.maxCol);
+    const { minRow, maxRow, minCol, maxCol } = range;
 
-    // Need at least 2×2 region to zoom
-    if (maxRow - minRow < 1 || maxCol - minCol < 1) {
+    // Need at least 2×2 region to zoom (clamp for the size check only)
+    const clampedMaxRow = Math.min(grid.rows - 1, Math.max(0, maxRow));
+    const clampedMaxCol = Math.min(grid.cols - 1, Math.max(0, maxCol));
+    const clampedMinRow = Math.max(0, minRow);
+    const clampedMinCol = Math.max(0, minCol);
+    if (clampedMaxRow - clampedMinRow < 1 || clampedMaxCol - clampedMinCol < 1) {
       animationLoop.start(); // redraw to clear highlight
       return;
     }
@@ -342,7 +384,8 @@ function showPanel(panel) {
 
 function handleCanvasClick(e) {
   // Ignore clicks that were part of a shift+drag zoom selection
-  if (e.shiftKey || suppressNextClick) { suppressNextClick = false; return; }
+  if (suppressNextClick) { suppressNextClick = false; return; }
+  if (e.shiftKey) return;
   if (!getReplayState()) return;
 
   const cssPos = eventToCanvasCSS(e);

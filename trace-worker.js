@@ -32,6 +32,29 @@ self.onmessage = async (e) => {
   }
 
   // Large file: parallel segment parsing
+  // Nested workers (workers spawned from a worker) are not supported in all
+  // browsers (Safari, older Chrome). Test by spawning one worker first; if it
+  // fails, fall back to single-threaded parsing.
+  let nestedWorkersSupported = true;
+  try {
+    const probe = new Worker("trace-segment-worker.js", { type: "module" });
+    probe.terminate();
+  } catch (_) {
+    nestedWorkersSupported = false;
+  }
+
+  if (!nestedWorkersSupported) {
+    try {
+      const traceData = await TraceParser.index(file, (pct) => {
+        self.postMessage({ type: "progress", pct });
+      });
+      postResult(traceData);
+    } catch (err) {
+      self.postMessage({ type: "error", message: err.message });
+    }
+    return;
+  }
+
   try {
     const segments = new Array(NUM_WORKERS).fill(null);
     const segProgress = new Array(NUM_WORKERS).fill(0);

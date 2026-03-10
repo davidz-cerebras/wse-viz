@@ -40,6 +40,7 @@ function _addRampTriangle(p, cx, cy, dir, isOn) {
       if (isOn) { x = cx - RAMP_LATERAL; p.moveTo(x, y + s); p.lineTo(x - s, y - s); p.lineTo(x + s, y - s); }
       else      { x = cx + RAMP_LATERAL; p.moveTo(x, y - s); p.lineTo(x - s, y + s); p.lineTo(x + s, y + s); }
       break;
+    default: return;
   }
   p.closePath();
 }
@@ -145,6 +146,16 @@ export class Grid {
       pe.stallReason = reason || null;
       // Stall color only shown when nothing is executing (op takes visual priority)
       if (stall && !pe.op) pe.fillColor = stall === "wavelet" ? PE_COLOR_STALL_WAVELET : PE_COLOR_STALL_PIPE;
+    }
+  }
+
+  refreshPEColors() {
+    for (const pe of this.pes) {
+      if (pe.opEntry) {
+        pe.fillColor = pe.opEntry.fillColor;
+      } else if (pe.stall && !pe.op) {
+        pe.fillColor = pe.stall === "wavelet" ? PE_COLOR_STALL_WAVELET : PE_COLOR_STALL_PIPE;
+      }
     }
   }
 
@@ -260,6 +271,7 @@ export class Grid {
     for (const pkt of this.packets) {
       if (!pkt.waypoints || !pkt.visible) continue;
       const wpI = pkt.wpIdx;
+      if (wpI < 0 || wpI >= pkt.waypoints.length) continue;
       const cur = pkt.waypoints[wpI];
       const fc = pkt.fractionalCycle;
       const depCycle = cur.depCycle;

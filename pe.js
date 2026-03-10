@@ -223,14 +223,30 @@ const CAT_FILL_COLOR = {
   "mem-write": PE_COLOR_MEM_WRITE,
 };
 
+// Set of disabled categories — entries with a disabled cat use PE_COLOR_EXEC.
+const _disabledCats = new Set();
+
+/** Update fill/text/sub colors on a single SYMBOLIC_OPS entry based on _disabledCats. */
+function _updateEntryColors(entry) {
+  const active = entry.cat && !_disabledCats.has(entry.cat);
+  entry.fillColor = active ? (CAT_FILL_COLOR[entry.cat] || PE_COLOR_EXEC) : PE_COLOR_EXEC;
+  if (active) {
+    entry.textColor = entry.cat === "task" ? PE_TEXT_TASK
+      : entry.cat === "ctrl" ? PE_TEXT_CTRL : PE_TEXT_DEFAULT;
+    entry.subColor = entry.cat === "task" ? PE_TEXT_TASK_SUB
+      : entry.cat === "ctrl" ? PE_TEXT_CTRL_SUB : PE_TEXT_DEFAULT_SUB;
+  } else {
+    entry.textColor = PE_TEXT_DEFAULT;
+    entry.subColor = PE_TEXT_DEFAULT_SUB;
+  }
+}
+
 // Pre-compute derived properties on each SYMBOLIC_OPS entry at module init.
+// _disabledCats is empty at this point, so _updateEntryColors produces the
+// same active-path values as the original inline logic.
 for (const entry of Object.values(SYMBOLIC_OPS)) {
   entry.isText = /^[A-Z]/.test(entry.symbol);
-  entry.textColor = entry.cat === "task" ? PE_TEXT_TASK
-    : entry.cat === "ctrl" ? PE_TEXT_CTRL : PE_TEXT_DEFAULT;
-  entry.subColor = entry.cat === "task" ? PE_TEXT_TASK_SUB
-    : entry.cat === "ctrl" ? PE_TEXT_CTRL_SUB : PE_TEXT_DEFAULT_SUB;
-  entry.fillColor = CAT_FILL_COLOR[entry.cat] || PE_COLOR_EXEC;
+  _updateEntryColors(entry);
 }
 
 // Font constants derived from CELL_SIZE — identical for every PE, so computed
@@ -252,6 +268,18 @@ let _opBitmapScale = 0;
 export function setOpBitmapScale(scale) {
   if (scale === _opBitmapScale) return;
   _opBitmapScale = scale;
+  _opBitmapCache.clear();
+}
+
+/** Toggle a category's coloring on/off. */
+export function setCatEnabled(cat, enabled) {
+  if (enabled) _disabledCats.delete(cat);
+  else _disabledCats.add(cat);
+  // Recompute fillColor and text colors on every entry
+  for (const entry of Object.values(SYMBOLIC_OPS)) {
+    _updateEntryColors(entry);
+  }
+  // Clear bitmap cache so text is re-rendered with updated colors
   _opBitmapCache.clear();
 }
 
@@ -387,7 +415,7 @@ export class PE {
         this.transitionDuration = 0;
       }
       // Update fill color to reflect brightness change (demo animation)
-      this.fillColor = this.brightness > 0.5 ? PE_COLOR_EXEC : PE_COLOR_IDLE;
+      if (!this.opEntry && !this.stall) this.fillColor = this.brightness > 0.5 ? PE_COLOR_EXEC : PE_COLOR_IDLE;
     }
   }
 
@@ -402,7 +430,7 @@ export class PE {
     }
 
     if (!this.op && this.stallReason) {
-      const fontSize = Math.min(FONT_SIZE_MAX_LABEL, FONT_SIZE_SCALE_LABEL / this.stallReason.length);
+      const fontSize = Math.min(FONT_SIZE_MAX_LABEL, FONT_SIZE_SCALE_LABEL / Math.max(1, this.stallReason.length));
       ctx.font = `${fontSize}px monospace`;
       ctx.fillStyle = this.stall === "wavelet" ? PE_STALL_TEXT_WAVELET : PE_STALL_TEXT_PIPE;
       ctx.textAlign = "center";
@@ -417,7 +445,7 @@ export class PE {
     if (entry) {
       ctx.drawImage(_getOpBitmap(entry), this.x, this.y, CELL_SIZE, CELL_SIZE);
     } else {
-      const fontSize = Math.min(FONT_SIZE_MAX_LABEL, FONT_SIZE_SCALE_LABEL / this.op.length);
+      const fontSize = Math.min(FONT_SIZE_MAX_LABEL, FONT_SIZE_SCALE_LABEL / Math.max(1, this.op.length));
       ctx.font = `${fontSize}px sans-serif`;
       ctx.fillStyle = PE_TEXT_DEFAULT_SUB;
       ctx.textAlign = "center";

@@ -8,8 +8,20 @@
   </head>
   <body>
     <div class="container">
+      <div id="sidebar" class="sidebar">
+        <h3 class="sidebar-heading">Operation Coloring</h3>
+        <label class="settings-item"><input type="checkbox" id="colorFpArith" checked /><span class="color-swatch" style="background: rgb(50, 185, 75)"></span>Floating-point arithmetic</label>
+        <label class="settings-item"><input type="checkbox" id="colorIntArith" checked /><span class="color-swatch" style="background: rgb(150, 220, 50)"></span>Integer arithmetic</label>
+        <label class="settings-item"><input type="checkbox" id="colorCtrl" checked /><span class="color-swatch" style="background: rgb(240, 240, 170)"></span>Control flow</label>
+        <label class="settings-item"><input type="checkbox" id="colorTask" checked /><span class="color-swatch" style="background: rgb(180, 180, 190)"></span>Task management</label>
+        <label class="settings-item"><input type="checkbox" id="colorMemRead" checked /><span class="color-swatch" style="background: rgb(230, 140, 190)"></span>Memory load</label>
+        <label class="settings-item"><input type="checkbox" id="colorMemWrite" checked /><span class="color-swatch" style="background: rgb(245, 170, 115)"></span>Memory store</label>
+      </div>
       <header>
-        <h1>Wafer-Scale Engine Visualizer</h1>
+        <div class="header-left">
+          <button id="sidebarBtn" class="icon-btn sidebar-btn" title="Toggle sidebar">&#9776;</button>
+          <h1>Wafer-Scale Engine Visualizer</h1>
+        </div>
         <div class="controls">
           <button id="startBtn" class="btn">Random</button>
           <button id="allReduceFullBtn" class="btn">AllReduce</button>

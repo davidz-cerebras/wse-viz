@@ -23,6 +23,16 @@ let maxCycleStr = ""; // cached String(maxCycle) for updateScrubUI
 
 let wavScanStart = 0; // low-water mark: wavelets before this index have expired
 
+/**
+ * Strip dot-suffixes (.NF, .F, .T, etc.) from an opcode name and return
+ * the base name, or null if the op is a NOP (which should be excluded from
+ * busy-cycle accounting like the bar chart).
+ */
+function _baseOpName(op) {
+  const base = (op || "?").split(".")[0];
+  return base === "NOP" ? null : base;
+}
+
 export function initReplay(deps) {
   grid = deps.grid;
   els = deps.els;
@@ -76,6 +86,7 @@ function sendLandingPackets(landingRange, msPerCycle, startTime) {
  * to ensure a single consistent code path for state reconstruction.
  */
 function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
+  if (!state) return;
   const td = traceData;
   if (!td) return;
 
@@ -88,9 +99,11 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
     }
   }
 
+  const rows = grid.rows;
   const cols = grid.cols;
   const pes = grid.pes;
   for (const item of td.peStateList) {
+    if (item.row >= rows || item.col >= cols) continue;
     const entry = item.entry;
     const pe = pes[item.row * cols + item.col];
     const found = TraceParser.findCycleIndexLE(entry.cycles, entry.length, targetCycle);
@@ -163,7 +176,7 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
     }
   } else if (currentCycleLandings) {
     const msPerCycle = 1000 / state.speed;
-    sendLandingPackets(currentCycleLandings, msPerCycle);
+    sendLandingPackets(currentCycleLandings, msPerCycle, performance.now());
   }
 
 }
@@ -222,8 +235,8 @@ export function selectPE(row, col, traceX, traceY) {
           } else {
             curBusy = entry.busy[evtIdx];
           }
-          curOp = td.opLookup[opId];
-          curPred = td.predLookup[entry.predIds[evtIdx]];
+          curOp = td.opLookup[opId] ?? "";
+          curPred = td.predLookup[entry.predIds[evtIdx]] ?? "";
           // Clear stall only if this exec is at a later cycle — same-cycle
           // stall+exec coexist (stall at issue stage, exec at EX stage)
           if (entry.cycles[evtIdx] > curStallCycle) curStallReason = null;
@@ -247,8 +260,8 @@ export function selectPE(row, col, traceX, traceY) {
   const opCounts = new Map();
   for (let i = 0; i < totalCycles; i++) {
     if (busyArr[i]) {
-      const o = (opArr[i] || "?").split(".")[0];
-      if (o !== "NOP") opCounts.set(o, (opCounts.get(o) || 0) + 1);
+      const o = _baseOpName(opArr[i]);
+      if (o) opCounts.set(o, (opCounts.get(o) || 0) + 1);
     }
   }
 
@@ -327,7 +340,7 @@ function updateOpChartHighlight() {
   const idx = state.currentCycle - selectedPE.minCycle;
   let currentOp = null;
   if (idx >= 0 && idx < selectedPE.totalCycles && selectedPE.busyArr[idx]) {
-    currentOp = (selectedPE.opArr[idx] || "?").split(".")[0];
+    currentOp = _baseOpName(selectedPE.opArr[idx]);
   }
 
   for (const row of els.opChart.children) {
@@ -429,6 +442,7 @@ export function deselectPE() {
   peTraceWindowStart = 0;
   peTraceWindowSize = 0;
   _highlightedEntry = null;
+  _lastScrolledEntry = null;
   els.traceLog.onscroll = null;
 
   els.tracePanel.classList.add("hidden");
@@ -445,6 +459,7 @@ export function deselectPE() {
 }
 
 let _highlightedEntry = null; // cached reference to avoid querySelector per frame
+let _lastScrolledEntry = null; // avoid calling scrollIntoView every frame for the same entry
 
 function updatePETraceHighlight() {
   if (!selectedPE || !state) return;
@@ -465,9 +480,12 @@ function updatePETraceHighlight() {
     if (localIdx < entries.length) {
       _highlightedEntry = entries[localIdx];
       _highlightedEntry.classList.add("current");
-      peTraceScrollLock = true;
-      try { entries[localIdx].scrollIntoView({ block: "nearest" }); }
-      finally { peTraceScrollLock = false; }
+      if (_lastScrolledEntry !== _highlightedEntry) {
+        _lastScrolledEntry = _highlightedEntry;
+        peTraceScrollLock = true;
+        try { entries[localIdx].scrollIntoView({ block: "nearest" }); }
+        finally { peTraceScrollLock = false; }
+      }
     }
   }
 
@@ -509,7 +527,7 @@ export function updateReplayTick(timestamp) {
   );
   state.currentCycle = endCycle;
 
-  if (endCycle !== lastReconstructedCycle) {
+  if (endCycle !== lastReconstructedCycle && traceData) {
     const range = TraceParser.getLandingRange(traceData.landingIndex, endCycle);
     reconstructStateAtCycle(endCycle, range);
     lastReconstructedCycle = endCycle;
@@ -622,6 +640,10 @@ function doStep(direction) {
   const startCycle = targetCycle - direction;
   const stepStart = now;
   if (stepAnimationId) cancelAnimationFrame(stepAnimationId);
+
+  // Set packets to starting position immediately so the first draw doesn't
+  // flash them at the target position before the animation begins.
+  syncTracedPackets(targetCycle, -direction);
 
   function stepAnimate(timestamp) {
     if (!state || state.playing) return;
@@ -867,9 +889,12 @@ export function setupScrubListeners() {
       window.removeEventListener("pointerup", onRelease);
       window.removeEventListener("pointercancel", onRelease);
       isScrubbing = false;
-      if (!state || !scrubWasPlaying) return;
-      scrubWasPlaying = false;
-      startPlaying(state.direction);
+      try {
+        if (!state || !scrubWasPlaying) return;
+        startPlaying(state.direction);
+      } finally {
+        scrubWasPlaying = false;
+      }
     };
     window.addEventListener("pointerup", onRelease);
     window.addEventListener("pointercancel", onRelease);
