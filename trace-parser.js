@@ -707,4 +707,43 @@ export class TraceParser {
   static toGridCoords(x, y, dimY) {
     return { row: dimY - 1 - y, col: x };
   }
+
+  /**
+   * Reconstruct a single PE's execution and stall state at a given cycle.
+   * Returns { busy, opId, stallType, stallReason } or null if no events found.
+   * The backward scan finds the most recent EX event and the most recent stall,
+   * including same-cycle stall+exec coexistence.
+   */
+  static reconstructPEAtCycle(entry, opNopLookup, targetCycle) {
+    const found = TraceParser.findCycleIndexLE(entry.cycles, entry.length, targetCycle);
+    if (found < 0) return null;
+
+    let exIdx = -1, stallIdx = -1;
+    for (let i = found; i >= 0; i--) {
+      if (!entry.stall[i]) { exIdx = i; break; }
+      if (stallIdx < 0) stallIdx = i;
+    }
+    if (exIdx >= 0 && stallIdx < 0 && exIdx > 0 &&
+        entry.stall[exIdx - 1] && entry.cycles[exIdx - 1] === entry.cycles[exIdx]) {
+      stallIdx = exIdx - 1;
+    }
+
+    let busy = 0, opId = 0;
+    if (exIdx >= 0) {
+      opId = entry.opIds[exIdx];
+      if (opNopLookup[opId]) { busy = 0; opId = 0; }
+      else busy = entry.busy[exIdx];
+    }
+
+    let stallType = null, stallReason = null;
+    if (stallIdx >= 0) {
+      const reasons = entry.stallReasons[stallIdx];
+      if (reasons && reasons.length > 0) {
+        stallType = reasons[0].type;
+        stallReason = reasons[0].reason;
+      }
+    }
+
+    return { busy, opId, stallType, stallReason };
+  }
 }

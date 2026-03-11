@@ -61,6 +61,4 @@ export const PE_TRACE_WINDOW = 500; // max DOM entries rendered at once
 export const STEP_ANIMATION_MS = 1000 / 16; // duration of single-step wavelet animation
 
 // Server mode tuning
-export const SERVER_PREFETCH_AHEAD = 5000;  // cycles to prefetch ahead of playback cursor
-export const SERVER_CACHE_MAX = 20000;     // max cached cycles before eviction (~1-2GB)
 export const SERVER_MAX_PREFETCH_INFLIGHT = 8; // max concurrent prefetch requests

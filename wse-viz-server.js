@@ -187,40 +187,10 @@ function handleState(cycle) {
   const td = traceData;
   const pes = [];
 
-  // PE state reconstruction (mirrors reconstructStateAtCycle in replay-controller.js)
   for (const item of td.peStateList) {
-    const entry = item.entry;
-    const found = TraceParser.findCycleIndexLE(entry.cycles, entry.length, cycle);
-    if (found < 0) continue;
-
-    let exIdx = -1, stallIdx = -1;
-    for (let i = found; i >= 0; i--) {
-      if (!entry.stall[i]) { exIdx = i; break; }
-      if (stallIdx < 0) stallIdx = i;
-    }
-    if (exIdx >= 0 && stallIdx < 0 && exIdx > 0 &&
-        entry.stall[exIdx - 1] && entry.cycles[exIdx - 1] === entry.cycles[exIdx]) {
-      stallIdx = exIdx - 1;
-    }
-
-    let busy = 0, opId = 0;
-    if (exIdx >= 0) {
-      opId = entry.opIds[exIdx];
-      if (td.opNopLookup[opId]) { busy = 0; opId = 0; }
-      else busy = entry.busy[exIdx];
-    }
-
-    let stallType = null, stallReason = null;
-    if (stallIdx >= 0) {
-      const reasons = entry.stallReasons[stallIdx];
-      if (reasons && reasons.length > 0) {
-        stallType = reasons[0].type;
-        stallReason = reasons[0].reason;
-      }
-    }
-
-    if (busy || opId || stallType) {
-      pes.push([item.row, item.col, busy, opId, stallType, stallReason]);
+    const rec = TraceParser.reconstructPEAtCycle(item.entry, td.opNopLookup, cycle);
+    if (rec && (rec.busy || rec.opId || rec.stallType)) {
+      pes.push([item.row, item.col, rec.busy, rec.opId, rec.stallType, rec.stallReason]);
     }
   }
 

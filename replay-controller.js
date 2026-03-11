@@ -1,7 +1,7 @@
 import { TraceParser, LANDING_DECODE } from "./trace-parser.js";
 import { extractBranches, TracedPacket } from "./wavelet.js";
 import { buildOpEntryLookup } from "./pe.js";
-import { PE_TRACE_WINDOW, STEP_ANIMATION_MS, SERVER_PREFETCH_AHEAD, SERVER_CACHE_MAX, SERVER_MAX_PREFETCH_INFLIGHT } from "./constants.js";
+import { PE_TRACE_WINDOW, STEP_ANIMATION_MS, SERVER_MAX_PREFETCH_INFLIGHT } from "./constants.js";
 
 let grid, els, animationLoop, showPanel, resizeCanvas;
 
@@ -143,7 +143,7 @@ function sendLandingPackets(landingRange, msPerCycle, startTime) {
  */
 function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
   if (!state) return;
-  if (serverMode) { reconstructFromServer(targetCycle); return; }
+  if (serverMode) return reconstructFromServer(targetCycle);
   const td = traceData;
   if (!td) return;
 
@@ -155,37 +155,16 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
   const pes = grid.pes;
   for (const item of td.peStateList) {
     if (item.row >= rows || item.col >= cols) continue;
-    const entry = item.entry;
     const pe = pes[item.row * cols + item.col];
-    const found = TraceParser.findCycleIndexLE(entry.cycles, entry.length, targetCycle);
-    if (found >= 0) {
-      let exIdx = -1;
-      let stallIdx = -1;
-      for (let i = found; i >= 0; i--) {
-        if (!entry.stall[i]) { exIdx = i; break; }
-        if (stallIdx < 0) stallIdx = i;
-      }
-      // Also check for a same-cycle stall just before the EX entry.
-      // The pipeline can have a stall (e.g., at issue stage) and an
-      // executing op (at EX stage) simultaneously at the same cycle.
-      if (exIdx >= 0 && stallIdx < 0 && exIdx > 0 &&
-          entry.stall[exIdx - 1] && entry.cycles[exIdx - 1] === entry.cycles[exIdx]) {
-        stallIdx = exIdx - 1;
-      }
-      if (exIdx >= 0) {
-        const opId = entry.opIds[exIdx];
-        if (td.opNopLookup[opId]) {
-          pe.setBusy(false, null, null);
-        } else {
-          pe.setBusy(!!entry.busy[exIdx], td.opLookup[opId], td.opEntryLookup[opId]);
-        }
+    const rec = TraceParser.reconstructPEAtCycle(item.entry, td.opNopLookup, targetCycle);
+    if (rec) {
+      if (rec.busy) {
+        pe.setBusy(true, td.opLookup[rec.opId], td.opEntryLookup[rec.opId]);
       } else {
         pe.setBusy(false, null, null);
       }
-      if (stallIdx >= 0) {
-        const reasons = entry.stallReasons[stallIdx];
-        const primary = reasons[0];
-        grid.setPEStall(item.row, item.col, primary.type, primary.reason);
+      if (rec.stallType) {
+        grid.setPEStall(item.row, item.col, rec.stallType, rec.stallReason);
       }
     } else {
       pe.setBusy(false, null, null);
@@ -535,6 +514,46 @@ function updateScrubUI() {
   els.scrubBar.value = state.currentCycle;
   const curStr = state.currentCycle.toLocaleString().padStart(maxCycleStr.length);
   els.cycleDisplay.textContent = `Cycle ${curStr} / ${maxCycleStr}`;
+  if (serverMode) updatePrefetchIndicator();
+}
+
+/**
+ * Update the scrub bar background to show prefetched regions.
+ * Builds a linear-gradient with cached (accent) and uncached (border) bands.
+ */
+let _lastPrefetchGradient = "";
+function updatePrefetchIndicator() {
+  if (!state) return;
+  const { minCycle, maxCycle } = state;
+  const range = maxCycle - minCycle;
+  if (range <= 0) return;
+
+  // Sample at ~200 points to keep gradient manageable
+  const steps = Math.min(range, 200);
+  const stepSize = range / steps;
+  const cached = "var(--color-prefetch)";
+  const uncached = "var(--color-border)";
+
+  let gradient = "";
+  let prevCached = false;
+  for (let i = 0; i <= steps; i++) {
+    const cycle = Math.round(minCycle + i * stepSize);
+    const val = serverStateCache.has(cycle) && serverStateCache.get(cycle) !== null;
+    const pct = (i / steps * 100).toFixed(1);
+    if (i === 0) {
+      gradient = `${val ? cached : uncached} ${pct}%`;
+      prevCached = val;
+    } else if (val !== prevCached) {
+      gradient += `, ${prevCached ? cached : uncached} ${pct}%, ${val ? cached : uncached} ${pct}%`;
+      prevCached = val;
+    }
+  }
+  gradient += `, ${prevCached ? cached : uncached} 100%`;
+  const full = `linear-gradient(to right, ${gradient})`;
+  if (full !== _lastPrefetchGradient) {
+    _lastPrefetchGradient = full;
+    els.scrubBar.style.background = full;
+  }
 }
 
 export function updateReplayTick(timestamp) {
@@ -679,29 +698,39 @@ function doStep(direction) {
   const targetCycle = state.currentCycle + direction;
   if (targetCycle < state.minCycle || targetCycle > state.maxCycle) return;
 
-  seekToCycle(targetCycle);
+  const ready = seekToCycle(targetCycle);
 
-  const startCycle = targetCycle - direction;
-  const stepStart = now;
-  if (stepAnimationId) cancelAnimationFrame(stepAnimationId);
+  function startStepAnimation() {
+    const startCycle = targetCycle - direction;
+    const stepStart = performance.now();
+    if (stepAnimationId) cancelAnimationFrame(stepAnimationId);
 
-  // Set packets to starting position immediately so the first draw doesn't
-  // flash them at the target position before the animation begins.
-  syncTracedPackets(targetCycle, -direction);
+    // Set packets to starting position immediately so the first draw doesn't
+    // flash them at the target position before the animation begins.
+    syncTracedPackets(targetCycle, -direction);
 
-  function stepAnimate(timestamp) {
-    if (!state || state.playing) return;
-    const t = Math.min((timestamp - stepStart) / STEP_ANIMATION_MS, 1);
-    const fc = startCycle + direction * t;
-    syncTracedPackets(targetCycle, fc - targetCycle);
-    animationLoop.start();
-    if (t < 1) {
-      stepAnimationId = requestAnimationFrame(stepAnimate);
-    } else {
-      stepAnimationId = 0;
+    function stepAnimate(timestamp) {
+      if (!state || state.playing) return;
+      const t = Math.min((timestamp - stepStart) / STEP_ANIMATION_MS, 1);
+      const fc = startCycle + direction * t;
+      syncTracedPackets(targetCycle, fc - targetCycle);
+      animationLoop.start();
+      if (t < 1) {
+        stepAnimationId = requestAnimationFrame(stepAnimate);
+      } else {
+        stepAnimationId = 0;
+      }
     }
+    stepAnimationId = requestAnimationFrame(stepAnimate);
   }
-  stepAnimationId = requestAnimationFrame(stepAnimate);
+
+  // In server mode, wait for reconstruction to complete before animating.
+  // Cache hits resolve immediately so there's no visible delay.
+  if (ready && typeof ready.then === "function") {
+    ready.then(() => { if (state && !state.playing) startStepAnimation(); });
+  } else {
+    startStepAnimation();
+  }
 }
 
 export function transportStepFwd() { doStep(1); }
@@ -720,10 +749,11 @@ function seekToCycle(targetCycle) {
   if (!state || !traceData || !Number.isFinite(targetCycle)) return;
 
   grid.resetTimers();
-  if (serverMode) { serverStateCache.clear(); serverError = false; clearServerStatus(); }
+  if (serverMode) { serverError = false; clearServerStatus(); }
 
-  // Reconstruct state without landings (seek uses frozen packets separately)
-  reconstructStateAtCycle(targetCycle);
+  // Reconstruct state without landings (seek uses frozen packets separately).
+  // Returns a Promise in server mode (resolved immediately on cache hit).
+  const ready = reconstructStateAtCycle(targetCycle);
   lastReconstructedCycle = targetCycle;
 
   state.currentCycle = targetCycle;
@@ -744,6 +774,7 @@ function seekToCycle(targetCycle) {
   }
 
   animationLoop.start();
+  return ready;
 }
 
 function _initPlaybackState(minCycle, maxCycle) {
@@ -875,18 +906,11 @@ function fetchServerState(cycle) {
     .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); });
 }
 
-/** Evict cache entries behind the playback cursor. */
-function evictServerCache() {
-  if (serverStateCache.size <= SERVER_CACHE_MAX) return;
-  const cur = state ? state.currentCycle : 0;
-  const dir = state ? state.direction : 1;
-  for (const key of serverStateCache.keys()) {
-    if (serverStateCache.size <= SERVER_CACHE_MAX / 2) break;
-    if ((dir > 0 && key < cur) || (dir < 0 && key > cur)) serverStateCache.delete(key);
-  }
-}
-
-/** Server-mode version of reconstructStateAtCycle. */
+/**
+ * Server-mode version of reconstructStateAtCycle.
+ * Returns a Promise that resolves when the grid state has been applied
+ * (immediately for cache hits, after fetch for misses).
+ */
 function reconstructFromServer(targetCycle) {
   // Check cache first — if hit, apply synchronously (no latency)
   const cached = serverStateCache.get(targetCycle);
@@ -896,11 +920,11 @@ function reconstructFromServer(targetCycle) {
     lastReconstructedCycle = targetCycle;
     serverPrefetch(); // keep the cache warm
     animationLoop.start();
-    return;
+    return Promise.resolve();
   }
 
   // Fetch from server (cache miss)
-  if (pendingStateFetch) return; // one primary fetch at a time
+  if (pendingStateFetch) return pendingStateFetch;
   if (state && state.playing) {
     console.warn(`[wse-viz] Cache miss at cycle ${targetCycle} (cache size: ${serverStateCache.size})`);
   }
@@ -927,29 +951,52 @@ function reconstructFromServer(targetCycle) {
       }
       showServerStatus(`Server error: ${err.message || "connection lost"}`);
     });
+  return pendingStateFetch;
 }
 
-/** Prefetch upcoming cycles into the cache during playback. */
+/**
+ * Continuously prefetch all cycles into the cache.
+ * Prioritizes the playback direction from the current position, then fills
+ * the other direction. Keeps firing until the entire trace is cached.
+ */
 function serverPrefetch() {
-  if (!state || !state.playing || !serverMode) return;
-  const dir = state.direction;
-  const cur = state.currentCycle;
-  const limit = dir > 0 ? state.maxCycle : state.minCycle;
+  if (!state || !serverMode) return;
+  const { minCycle, maxCycle, currentCycle, direction: dir } = state;
 
-  for (let i = 1; i <= SERVER_PREFETCH_AHEAD; i++) {
-    if (prefetchInFlight >= SERVER_MAX_PREFETCH_INFLIGHT) break;
-    const cycle = cur + dir * i;
-    if ((dir > 0 && cycle > limit) || (dir < 0 && cycle < limit)) break;
-    if (serverStateCache.has(cycle)) continue;
+  // Find uncached cycles, starting from current position in playback direction
+  function nextUncached() {
+    // Playback direction first
+    if (dir > 0) {
+      for (let c = currentCycle + 1; c <= maxCycle; c++)
+        if (!serverStateCache.has(c)) return c;
+      for (let c = currentCycle - 1; c >= minCycle; c--)
+        if (!serverStateCache.has(c)) return c;
+    } else {
+      for (let c = currentCycle - 1; c >= minCycle; c--)
+        if (!serverStateCache.has(c)) return c;
+      for (let c = currentCycle + 1; c <= maxCycle; c++)
+        if (!serverStateCache.has(c)) return c;
+    }
+    return -1; // fully cached
+  }
 
+  while (prefetchInFlight < SERVER_MAX_PREFETCH_INFLIGHT) {
+    const cycle = nextUncached();
+    if (cycle < 0) break; // everything cached
+    // Mark as "pending" to avoid duplicate requests
+    serverStateCache.set(cycle, null);
     prefetchInFlight++;
     fetchServerState(cycle)
       .then(data => {
-        if (prefetchInFlight > 0) prefetchInFlight--;
+        prefetchInFlight--;
         serverStateCache.set(cycle, data);
-        evictServerCache();
+        updatePrefetchIndicator();
+        serverPrefetch(); // keep filling
       })
-      .catch(() => { if (prefetchInFlight > 0) prefetchInFlight--; });
+      .catch(() => {
+        prefetchInFlight--;
+        serverStateCache.delete(cycle); // clear the null placeholder
+      });
   }
 }
 
