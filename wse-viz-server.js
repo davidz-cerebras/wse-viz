@@ -9,10 +9,13 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { hostname } from "node:os";
+import { hostname, cpus } from "node:os";
+import { Worker } from "node:worker_threads";
 import { NodeFile } from "./node-file.js";
 import { TraceParser } from "./trace-parser.js";
 import { extractBranches } from "./wavelet.js";
+
+const PARALLEL_THRESHOLD = 64 * 1024 * 1024; // 64MB
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -41,13 +44,59 @@ if (!existsSync(traceFile)) {
 
 const installDir = join(fileURLToPath(import.meta.url), "..");
 
-process.stderr.write(`Indexing ${traceFile}...\n`);
 const nodeFile = new NodeFile(traceFile);
-const raw = await TraceParser.index(nodeFile, (pct) => {
-  process.stderr.write(`\r  ${pct.toFixed(1)}%`);
-});
+let raw;
+
+if (nodeFile.size < PARALLEL_THRESHOLD) {
+  process.stderr.write(`Indexing ${traceFile} (single-threaded)...\n`);
+  raw = await TraceParser.index(nodeFile, (pct) => {
+    process.stderr.write(`\r  ${pct.toFixed(1)}%`);
+  });
+  process.stderr.write("\r  done.     \n");
+} else {
+  const numWorkers = cpus().length;
+  process.stderr.write(`Indexing ${traceFile} (${numWorkers} threads)...\n`);
+  const segWorkerPath = join(installDir, "node-segment-worker.js");
+  const segProgress = new Array(numWorkers).fill(0);
+
+  const segments = await new Promise((resolve, reject) => {
+    const results = new Array(numWorkers).fill(null);
+    let completed = 0;
+    let error = null;
+
+    for (let i = 0; i < numWorkers; i++) {
+      const startByte = Math.floor(nodeFile.size * i / numWorkers);
+      const endByte = Math.floor(nodeFile.size * (i + 1) / numWorkers);
+      const w = new Worker(segWorkerPath, {
+        workerData: { filePath: traceFile, startByte, endByte, isFirst: i === 0, segmentIndex: i },
+      });
+
+      w.on("error", (err) => {
+        if (!error) { error = err; reject(err); }
+      });
+
+      w.on("message", (msg) => {
+        if (msg.type === "progress") {
+          segProgress[msg.segmentIndex] = msg.pct;
+          const overall = segProgress.reduce((a, b) => a + b, 0) / numWorkers;
+          process.stderr.write(`\r  ${overall.toFixed(1)}%`);
+        } else if (msg.type === "done") {
+          results[msg.segmentIndex] = msg.result;
+          completed++;
+          if (completed === numWorkers) resolve(results);
+        }
+      });
+    }
+  });
+
+  process.stderr.write("\r  merging...     \n");
+  raw = TraceParser.mergeSegments(segments, (step, pct) => {
+    process.stderr.write(`\r  ${step} ${pct.toFixed(1)}%`);
+  });
+  process.stderr.write("\r  done.              \n");
+}
+
 nodeFile.close();
-process.stderr.write("\r  done.     \n");
 
 // Post-process into traceData (mirrors trace-worker.js postResult + replay-controller.js "done" handler)
 const peStateIndex = raw.peStateIndex;

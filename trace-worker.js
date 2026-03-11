@@ -12,8 +12,8 @@
 
 import { TraceParser } from "./trace-parser.js";
 
-const NUM_WORKERS = 8;
-const PARALLEL_THRESHOLD = 100 * 1024 * 1024; // 100MB — below this, use single-threaded
+const NUM_WORKERS = navigator.hardwareConcurrency || 4;
+const PARALLEL_THRESHOLD = 64 * 1024 * 1024; // 64MB — below this, use single-threaded
 
 self.onmessage = async (e) => {
   const { file } = e.data;
