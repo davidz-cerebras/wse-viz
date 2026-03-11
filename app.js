@@ -69,6 +69,7 @@ function init() {
     loadingPct: document.getElementById("loadingPct"),
     loadingLabel: document.querySelector("#loadingBar .loading-label"),
     playbackControls: document.getElementById("playbackControls"),
+    serverStatus: document.getElementById("serverStatus"),
   };
 
   setGrid(GRID_ROWS, GRID_COLS);
@@ -77,15 +78,14 @@ function init() {
   initDemo({ grid, els, animationLoop, cancelReplay, showPanel, setGrid });
   setupEventListeners();
 
-  // Detect server mode: if /api/meta responds, skip the file picker and load from server
+  // Detect server mode: if /api/meta responds, skip the file picker and load from server.
+  // Hide controls immediately to avoid a flash; show them back if not in server mode.
+  const controlsEl = document.querySelector(".controls");
+  controlsEl.style.display = "none";
   fetch("/api/meta").then(r => r.ok ? r.json() : null).then(meta => {
-    if (!meta) return;
-    // Hide demo buttons and file picker — server provides the trace
-    for (const el of document.querySelectorAll(".controls .btn, .controls .file-input-label, .controls-separator")) {
-      el.style.display = "none";
-    }
+    if (!meta) { controlsEl.style.display = ""; return; }
     initServerMode(meta, setGrid);
-  }).catch(() => {}); // not server mode — silently continue with local UI
+  }).catch(() => { controlsEl.style.display = ""; });
 }
 
 function update(timestamp) {

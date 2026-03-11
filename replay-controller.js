@@ -1,7 +1,7 @@
 import { TraceParser, LANDING_DECODE } from "./trace-parser.js";
 import { extractBranches, TracedPacket } from "./wavelet.js";
 import { buildOpEntryLookup } from "./pe.js";
-import { PE_TRACE_WINDOW } from "./constants.js";
+import { PE_TRACE_WINDOW, STEP_ANIMATION_MS, SERVER_PREFETCH_AHEAD, SERVER_CACHE_MAX, SERVER_MAX_PREFETCH_INFLIGHT } from "./constants.js";
 
 let grid, els, animationLoop, showPanel, resizeCanvas;
 
@@ -25,6 +25,9 @@ let maxCycleStr = ""; // cached String(maxCycle) for updateScrubUI
 // Server mode state
 let serverMode = false;
 let pendingStateFetch = null; // in-flight /api/state fetch, or null
+let serverStateCache = new Map(); // cycle → parsed /api/state response
+let prefetchInFlight = 0; // number of prefetch requests currently in-flight
+let serverError = false; // true if last fetch failed
 
 /**
  * Strip dot-suffixes (.NF, .F, .T, etc.) from an opcode name and return
@@ -452,19 +455,19 @@ async function selectPEFromServer(row, col, traceX, traceY) {
 
   let resp;
   try { resp = await fetch(`/api/pe-trace?x=${traceX}&y=${traceY}`); }
-  catch { return; }
+  catch { deselectPE(); return; }
   if (myGen !== peSelectGeneration) return; // stale response — user clicked another PE
 
   let data;
   try { data = await resp.json(); }
-  catch { return; }
+  catch { deselectPE(); return; }
   if (myGen !== peSelectGeneration) return;
 
   const entry = data.found ? data.entry : null;
   const flat = _buildFlatPEState(entry, td, minCycle, maxCycle);
 
   selectedPE = { row, col, traceX, traceY, minCycle, ...flat };
-  els.tracePanel.querySelector("h2").textContent = `PE (${traceX}, ${traceY})`;
+  els.tracePanel.querySelector("h2").textContent = `P${traceX}.${traceY} Trace`;
   renderOpChart();
   renderPETraceWindow(state.currentCycle);
   setupPETraceScroll();
@@ -541,10 +544,18 @@ export function updateReplayTick(timestamp) {
   const elapsed = timestamp - state.lastTickTime;
   const msPerCycle = 1000 / state.speed;
 
-  const cyclesToAdvance = Math.floor(elapsed / msPerCycle);
+  // In server mode, don't advance to the next cycle until the server has
+  // delivered the state for the current one. This keeps PEs and wavelets
+  // visually consistent — wavelets won't move ahead of PE state.
+  const serverBlocked = serverMode && pendingStateFetch;
+  if (serverBlocked && elapsed >= msPerCycle) {
+    console.warn(`[wse-viz] Playback hitch: waiting for server (cycle ${state.currentCycle}, ${elapsed.toFixed(0)}ms stalled)`);
+  }
+
+  const cyclesToAdvance = serverBlocked ? 0 : Math.floor(elapsed / msPerCycle);
   if (cyclesToAdvance <= 0) {
     // No cycle change — just sync fractional position for smooth animation
-    const frac = dir * Math.min(Math.max(0, elapsed) / msPerCycle, 1);
+    const frac = serverBlocked ? 0 : dir * Math.min(Math.max(0, elapsed) / msPerCycle, 1);
     syncTracedPackets(state.currentCycle, frac);
     return;
   }
@@ -652,14 +663,13 @@ export function transportPause() {
   }
 }
 
-const STEP_MS = 1000 / 16;
 let lastStepTime = 0;
 let stepAnimationId = 0;
 
 function doStep(direction) {
   if (!state || !traceData) return;
   const now = performance.now();
-  if (now - lastStepTime < STEP_MS) return;
+  if (now - lastStepTime < STEP_ANIMATION_MS) return;
   lastStepTime = now;
 
   state.playing = false;
@@ -681,7 +691,7 @@ function doStep(direction) {
 
   function stepAnimate(timestamp) {
     if (!state || state.playing) return;
-    const t = Math.min((timestamp - stepStart) / STEP_MS, 1);
+    const t = Math.min((timestamp - stepStart) / STEP_ANIMATION_MS, 1);
     const fc = startCycle + direction * t;
     syncTracedPackets(targetCycle, fc - targetCycle);
     animationLoop.start();
@@ -710,6 +720,7 @@ function seekToCycle(targetCycle) {
   if (!state || !traceData || !Number.isFinite(targetCycle)) return;
 
   grid.resetTimers();
+  if (serverMode) { serverStateCache.clear(); serverError = false; clearServerStatus(); }
 
   // Reconstruct state without landings (seek uses frozen packets separately)
   reconstructStateAtCycle(targetCycle);
@@ -735,6 +746,28 @@ function seekToCycle(targetCycle) {
   animationLoop.start();
 }
 
+function _initPlaybackState(minCycle, maxCycle) {
+  maxCycleStr = maxCycle.toLocaleString();
+  const speed = 4;
+  els.speedDisplay.textContent = `${speed} Hz`;
+
+  state = {
+    currentCycle: minCycle,
+    speed,
+    playing: false,
+    direction: 1,
+    lastTickTime: performance.now(),
+    minCycle,
+    maxCycle,
+  };
+
+  els.scrubBar.min = minCycle;
+  els.scrubBar.max = maxCycle;
+  els.scrubBar.value = minCycle;
+  updateTransportUI();
+  seekToCycle(minCycle);
+}
+
 export function cancelReplay() {
   handleTraceGeneration++;
   if (activeWorker) { activeWorker.terminate(); activeWorker = null; }
@@ -748,6 +781,9 @@ export function cancelReplay() {
   scrubWasPlaying = false;
   serverMode = false;
   pendingStateFetch = null;
+  serverStateCache.clear();
+  prefetchInFlight = 0;
+  serverError = false;
   maxCycleStr = "";
   showPanel(null);
   els.cycleDisplay.textContent = "";
@@ -784,26 +820,7 @@ export function initServerMode(meta, setGrid) {
   grid.showRamps = meta.hasWaveletData;
   showPanel("trace");
 
-  const { minCycle, maxCycle } = meta;
-  maxCycleStr = maxCycle.toLocaleString();
-  const speed = 4;
-  els.speedDisplay.textContent = `${speed} Hz`;
-
-  state = {
-    currentCycle: minCycle,
-    speed,
-    playing: false,
-    direction: 1,
-    lastTickTime: performance.now(),
-    minCycle,
-    maxCycle,
-  };
-
-  els.scrubBar.min = minCycle;
-  els.scrubBar.max = maxCycle;
-  els.scrubBar.value = minCycle;
-  updateTransportUI();
-  seekToCycle(minCycle);
+  _initPlaybackState(meta.minCycle, meta.maxCycle);
 }
 
 /** Apply a /api/state response to the grid. */
@@ -842,20 +859,98 @@ function applyServerState(data) {
   }
 }
 
+function showServerStatus(msg) {
+  els.serverStatus.textContent = msg;
+  els.serverStatus.classList.remove("hidden");
+}
+
+function clearServerStatus() {
+  els.serverStatus.textContent = "";
+  els.serverStatus.classList.add("hidden");
+}
+
+/** Fetch a single cycle from the server. Returns a Promise of the parsed response. */
+function fetchServerState(cycle) {
+  return fetch(`/api/state?cycle=${cycle}`)
+    .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); });
+}
+
+/** Evict cache entries behind the playback cursor. */
+function evictServerCache() {
+  if (serverStateCache.size <= SERVER_CACHE_MAX) return;
+  const cur = state ? state.currentCycle : 0;
+  const dir = state ? state.direction : 1;
+  for (const key of serverStateCache.keys()) {
+    if (serverStateCache.size <= SERVER_CACHE_MAX / 2) break;
+    if ((dir > 0 && key < cur) || (dir < 0 && key > cur)) serverStateCache.delete(key);
+  }
+}
+
 /** Server-mode version of reconstructStateAtCycle. */
 function reconstructFromServer(targetCycle) {
-  if (pendingStateFetch) return; // don't spam requests
-  pendingStateFetch = fetch(`/api/state?cycle=${targetCycle}`)
-    .then(r => r.json())
+  // Check cache first — if hit, apply synchronously (no latency)
+  const cached = serverStateCache.get(targetCycle);
+  if (cached) {
+    if (serverError) { serverError = false; clearServerStatus(); }
+    applyServerState(cached);
+    lastReconstructedCycle = targetCycle;
+    serverPrefetch(); // keep the cache warm
+    animationLoop.start();
+    return;
+  }
+
+  // Fetch from server (cache miss)
+  if (pendingStateFetch) return; // one primary fetch at a time
+  if (state && state.playing) {
+    console.warn(`[wse-viz] Cache miss at cycle ${targetCycle} (cache size: ${serverStateCache.size})`);
+  }
+  pendingStateFetch = fetchServerState(targetCycle)
     .then(data => {
       pendingStateFetch = null;
-      // Only apply if we haven't moved far past this cycle
+      if (serverError) { serverError = false; clearServerStatus(); }
       if (!state) return;
+      serverStateCache.set(targetCycle, data);
       applyServerState(data);
       lastReconstructedCycle = data.cycle;
+      // Reset tick time so the next updateReplayTick doesn't see the time
+      // spent waiting for the fetch as elapsed playback time.
+      if (state.playing) state.lastTickTime = performance.now();
+      serverPrefetch(); // start filling cache ahead
       animationLoop.start();
     })
-    .catch(() => { pendingStateFetch = null; });
+    .catch(err => {
+      pendingStateFetch = null;
+      serverError = true;
+      if (state) {
+        state.playing = false;
+        updateTransportUI();
+      }
+      showServerStatus(`Server error: ${err.message || "connection lost"}`);
+    });
+}
+
+/** Prefetch upcoming cycles into the cache during playback. */
+function serverPrefetch() {
+  if (!state || !state.playing || !serverMode) return;
+  const dir = state.direction;
+  const cur = state.currentCycle;
+  const limit = dir > 0 ? state.maxCycle : state.minCycle;
+
+  for (let i = 1; i <= SERVER_PREFETCH_AHEAD; i++) {
+    if (prefetchInFlight >= SERVER_MAX_PREFETCH_INFLIGHT) break;
+    const cycle = cur + dir * i;
+    if ((dir > 0 && cycle > limit) || (dir < 0 && cycle < limit)) break;
+    if (serverStateCache.has(cycle)) continue;
+
+    prefetchInFlight++;
+    fetchServerState(cycle)
+      .then(data => {
+        if (prefetchInFlight > 0) prefetchInFlight--;
+        serverStateCache.set(cycle, data);
+        evictServerCache();
+      })
+      .catch(() => { if (prefetchInFlight > 0) prefetchInFlight--; });
+  }
 }
 
 export function handleTraceFile(event, setGrid) {
@@ -994,26 +1089,7 @@ export function handleTraceFile(event, setGrid) {
       grid.showRamps = td.hasWaveletData;
       animationLoop.start();
       showPanel("trace");
-      const { minCycle, maxCycle } = traceData;
-      maxCycleStr = maxCycle.toLocaleString();
-      const speed = 4;
-      els.speedDisplay.textContent = `${speed} Hz`;
-
-      state = {
-        currentCycle: minCycle,
-        speed,
-        playing: false,
-        direction: 1, // +1 = forward, -1 = reverse
-        lastTickTime: performance.now(),
-        minCycle,
-        maxCycle,
-      };
-
-      els.scrubBar.min = minCycle;
-      els.scrubBar.max = maxCycle;
-      els.scrubBar.value = minCycle;
-      updateTransportUI();
-      seekToCycle(minCycle);
+      _initPlaybackState(traceData.minCycle, traceData.maxCycle);
     } // case "done"
     } // switch
   };

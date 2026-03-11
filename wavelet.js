@@ -88,31 +88,37 @@ export function extractBranches(wavelet) {
 
   function continueTrace(waypoints, cx, cy, cc) {
     for (;;) {
-      // Deduplicate: if another branch already traced from this (cycle, x, y), stop
-      const visitKey = `${cc},${cx},${cy}`;
-      if (visited.has(visitKey)) break;
-      visited.add(visitKey);
-
       const dep = getDepartures(cc, cx, cy);
       if (!dep) break;
 
       const fromX = cx, fromY = cy;
       let followed = false;
+      let terminated = false; // true if main branch's destination was already visited
 
+      // Deduplicate converging branches: when multiple branches arrive at the
+      // same next PE at the same cycle, only the first one continues tracing
+      // onward. All branches still get their departure waypoint set, so they
+      // animate the crossing from on-ramp to off-ramp before merging.
       for (const dir of dep.dirs) {
         const d = DIR_DELTA[dir];
         if (!d) continue;
         const nx = fromX + d[0], ny = fromY + d[1];
         const nc = dep.depCycle + 1;
 
-        // Skip if the destination PE at this cycle was already reached by another branch
-        if (visited.has(`${nc},${nx},${ny}`)) continue;
-
         if (!followed) {
           // Record departure on the current waypoint
           waypoints[waypoints.length - 1].departDir = dir;
           waypoints[waypoints.length - 1].depCycle = dep.depCycle;
-          // Add arrival at the next PE
+
+          // Check if the next PE was already reached by another branch.
+          // If so, the crossing animation still plays (departDir is set) but
+          // we don't push an arrival waypoint — the dot stops at the off-ramp.
+          const destKey = `${nc},${nx},${ny}`;
+          if (visited.has(destKey)) {
+            terminated = true;
+            break; // no arrival pushed — skip remaining fork directions
+          }
+          visited.add(destKey);
           const nextArriveDir = getLandingDir(nc, nx, ny) || DIR_OPPOSITE[dir];
           waypoints.push({ cycle: nc, x: nx, y: ny, arriveDir: nextArriveDir, departDir: null, depCycle: null });
           cx = nx; cy = ny; cc = nc;
@@ -123,11 +129,25 @@ export function extractBranches(wavelet) {
           // crosses to this fork's off-ramp direction. This makes the packet
           // visually diverge from the parent — one dot becomes two.
           const forkPeWp = waypoints[waypoints.length - 2];
-          const nextArriveDir = getLandingDir(nc, nx, ny) || DIR_OPPOSITE[dir];
           const forkStart = {
             cycle: forkPeWp.cycle, x: fromX, y: fromY,
             arriveDir: forkPeWp.arriveDir, departDir: dir, depCycle: dep.depCycle,
           };
+
+          // If destination already reached, emit a short branch that shows
+          // the crossing animation (on-ramp → off-ramp) then terminates
+          const destKey = `${nc},${nx},${ny}`;
+          if (visited.has(destKey)) {
+            const nextArriveDir = getLandingDir(nc, nx, ny) || DIR_OPPOSITE[dir];
+            branches.push([forkStart, {
+              cycle: nc, x: nx, y: ny,
+              arriveDir: nextArriveDir, departDir: null, depCycle: null,
+            }]);
+            continue;
+          }
+          visited.add(destKey);
+
+          const nextArriveDir = getLandingDir(nc, nx, ny) || DIR_OPPOSITE[dir];
           const forkDest = {
             cycle: nc, x: nx, y: ny,
             arriveDir: nextArriveDir, departDir: null, depCycle: null,
@@ -153,7 +173,7 @@ export function extractBranches(wavelet) {
         }
       }
 
-      if (!followed) break;
+      if (!followed || terminated) break;
     }
 
     if (waypoints.length > 1) {

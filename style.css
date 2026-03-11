@@ -63,6 +63,13 @@ header h1 {
   background-clip: text;
 }
 
+.server-status {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #ff6b6b;
+  white-space: nowrap;
+}
+
 .sidebar {
   position: fixed;
   top: var(--header-height, 3rem);
@@ -94,18 +101,15 @@ header h1 {
   margin-bottom: 0.3rem;
 }
 
-.sidebar-btn {
+.sidebar-btn.icon-btn {
   font-size: 1.5rem;
   width: 2rem;
   height: 2rem;
-  padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   background: none;
-  border: none;
   color: var(--color-text-secondary);
-  cursor: pointer;
   border-radius: 4px;
   transition: color 0.2s;
 }

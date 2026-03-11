@@ -9,6 +9,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { hostname } from "node:os";
 import { NodeFile } from "./node-file.js";
 import { TraceParser } from "./trace-parser.js";
 import { extractBranches } from "./wavelet.js";
@@ -163,8 +164,10 @@ function handleState(cycle) {
     let stallType = null, stallReason = null;
     if (stallIdx >= 0) {
       const reasons = entry.stallReasons[stallIdx];
-      stallType = reasons[0].type;
-      stallReason = reasons[0].reason;
+      if (reasons && reasons.length > 0) {
+        stallType = reasons[0].type;
+        stallReason = reasons[0].reason;
+      }
     }
 
     if (busy || opId || stallType) {
@@ -228,18 +231,7 @@ function handlePETrace(x, y) {
 
   if (!entry) return JSON.stringify({ found: false });
 
-  // Compute opCounts (mirrors selectPE logic)
-  const opCounts = {};
-  for (let i = 0; i < entry.length; i++) {
-    if (entry.stall[i]) continue;
-    const opId = entry.opIds[i];
-    const op = td.opLookup[opId] ?? "";
-    if (!op || op === "NOP" || op.startsWith("NOP.")) continue;
-    const base = op.includes(".") ? op.substring(0, op.indexOf(".")) : op;
-    opCounts[base] = (opCounts[base] || 0) + 1;
-  }
-
-  // Send sparse entry data — client reconstructs flat arrays
+  // Send sparse entry data — client reconstructs flat arrays and computes opCounts
   return JSON.stringify({
     found: true,
     entry: {
@@ -251,7 +243,6 @@ function handlePETrace(x, y) {
       stall: Array.from(entry.stall),
       stallReasons: entry.stallReasons,
     },
-    opCounts,
   });
 }
 
@@ -272,9 +263,10 @@ function serveStatic(res, urlPath) {
   const safePath = urlPath === "/" ? "/index.html" : urlPath;
   if (safePath.includes("..")) { res.writeHead(403); res.end(); return; }
   const filePath = join(installDir, safePath);
+  const mime = MIME[extname(filePath).toLowerCase()];
+  if (!mime) { res.writeHead(404); res.end("Not found"); return; }
   try {
     const data = readFileSync(filePath);
-    const mime = MIME[extname(filePath)] || "application/octet-stream";
     res.writeHead(200, { "Content-Type": mime });
     res.end(data);
   } catch {
@@ -320,8 +312,22 @@ const server = createServer((req, res) => {
   serveStatic(res, path);
 });
 
-import { hostname } from "node:os";
+const MAX_PORT_ATTEMPTS = 20;
 
-server.listen(port, () => {
-  process.stderr.write(`Server ready — open http://${hostname()}:${port}\n`);
-});
+function tryListen(attempt) {
+  const tryPort = port + attempt;
+  server.once("error", (err) => {
+    if (err.code === "EADDRINUSE" && attempt < MAX_PORT_ATTEMPTS - 1) {
+      process.stderr.write(`Port ${tryPort} in use, trying ${tryPort + 1}...\n`);
+      tryListen(attempt + 1);
+    } else {
+      process.stderr.write(`Error: ${err.message}\n`);
+      process.exit(1);
+    }
+  });
+  server.listen(tryPort, () => {
+    process.stderr.write(`Server ready — open http://${hostname()}:${tryPort}\n`);
+  });
+}
+
+tryListen(0);
