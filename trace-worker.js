@@ -18,16 +18,17 @@ const PARALLEL_THRESHOLD = 100 * 1024 * 1024; // 100MB — below this, use singl
 self.onmessage = async (e) => {
   const { file } = e.data;
 
+  async function parseSingleThreaded() {
+    const traceData = await TraceParser.index(file, (pct) => {
+      self.postMessage({ type: "progress", pct });
+    });
+    postResult(traceData);
+  }
+
   if (file.size < PARALLEL_THRESHOLD) {
     // Small file: single-threaded (avoids worker spawn overhead)
-    try {
-      const traceData = await TraceParser.index(file, (pct) => {
-        self.postMessage({ type: "progress", pct });
-      });
-      postResult(traceData);
-    } catch (err) {
-      self.postMessage({ type: "error", message: err.message });
-    }
+    try { await parseSingleThreaded(); }
+    catch (err) { self.postMessage({ type: "error", message: err.message }); }
     return;
   }
 
@@ -44,14 +45,8 @@ self.onmessage = async (e) => {
   }
 
   if (!nestedWorkersSupported) {
-    try {
-      const traceData = await TraceParser.index(file, (pct) => {
-        self.postMessage({ type: "progress", pct });
-      });
-      postResult(traceData);
-    } catch (err) {
-      self.postMessage({ type: "error", message: err.message });
-    }
+    try { await parseSingleThreaded(); }
+    catch (err) { self.postMessage({ type: "error", message: err.message }); }
     return;
   }
 

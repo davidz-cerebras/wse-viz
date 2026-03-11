@@ -11,11 +11,15 @@ import {
   updateReplayTick, transportFwdPlay, transportRevPlay, transportPause,
   transportStepFwd, transportStepBack, adjustSpeed,
   cancelReplay, handleTraceFile, setupScrubListeners,
-  selectPE, deselectPE,
+  selectPE, deselectPE, initServerMode,
 } from "./replay-controller.js";
 import { setOpBitmapScale, setCatEnabled } from "./pe.js";
 import { setLabelBitmapScale } from "./draw-utils.js";
-import { CELL_SIZE, GAP_SIZE } from "./constants.js";
+import {
+  CELL_SIZE, GAP_SIZE,
+  PE_COLOR_FP_ARITH, PE_COLOR_INT_ARITH, PE_COLOR_CTRL,
+  PE_COLOR_TASK, PE_COLOR_MEM_READ, PE_COLOR_MEM_WRITE,
+} from "./constants.js";
 
 let grid;
 let animationLoop;
@@ -72,6 +76,16 @@ function init() {
   initReplay({ grid, els, animationLoop, showPanel, resizeCanvas });
   initDemo({ grid, els, animationLoop, cancelReplay, showPanel, setGrid });
   setupEventListeners();
+
+  // Detect server mode: if /api/meta responds, skip the file picker and load from server
+  fetch("/api/meta").then(r => r.ok ? r.json() : null).then(meta => {
+    if (!meta) return;
+    // Hide demo buttons and file picker — server provides the trace
+    for (const el of document.querySelectorAll(".controls .btn, .controls .file-input-label, .controls-separator")) {
+      el.style.display = "none";
+    }
+    initServerMode(meta, setGrid);
+  }).catch(() => {}); // not server mode — silently continue with local UI
 }
 
 function update(timestamp) {
@@ -107,12 +121,11 @@ function setupEventListeners() {
   document.documentElement.style.setProperty("--header-height", headerEl.offsetHeight + "px");
   const sidebarBtn = document.getElementById("sidebarBtn");
   const sidebar = document.getElementById("sidebar");
-  const playbackBar = document.getElementById("playbackBar");
   function updateSidebarBounds() {
-    const pbH = playbackBar.classList.contains("hidden") ? 0 : playbackBar.offsetHeight;
+    const pbH = els.playbackBar.classList.contains("hidden") ? 0 : els.playbackBar.offsetHeight;
     document.documentElement.style.setProperty("--playback-height", pbH + "px");
   }
-  new MutationObserver(updateSidebarBounds).observe(playbackBar, { attributes: true, attributeFilter: ["class"] });
+  new MutationObserver(updateSidebarBounds).observe(els.playbackBar, { attributes: true, attributeFilter: ["class"] });
   sidebarBtn.addEventListener("click", () => {
     updateSidebarBounds();
     sidebar.classList.toggle("open");
@@ -123,17 +136,20 @@ function setupEventListeners() {
     }
   });
 
-  // Category coloring checkboxes
+  // Category coloring checkboxes — also set swatch colors from constants
   const catCheckboxes = [
-    ["colorFpArith", "fp-arith"],
-    ["colorIntArith", "int-arith"],
-    ["colorCtrl", "ctrl"],
-    ["colorTask", "task"],
-    ["colorMemRead", "mem-read"],
-    ["colorMemWrite", "mem-write"],
+    ["colorFpArith", "fp-arith", PE_COLOR_FP_ARITH],
+    ["colorIntArith", "int-arith", PE_COLOR_INT_ARITH],
+    ["colorCtrl", "ctrl", PE_COLOR_CTRL],
+    ["colorTask", "task", PE_COLOR_TASK],
+    ["colorMemRead", "mem-read", PE_COLOR_MEM_READ],
+    ["colorMemWrite", "mem-write", PE_COLOR_MEM_WRITE],
   ];
-  for (const [id, cat] of catCheckboxes) {
-    document.getElementById(id).addEventListener("change", (e) => {
+  for (const [id, cat, color] of catCheckboxes) {
+    const checkbox = document.getElementById(id);
+    const swatch = checkbox.parentElement.querySelector(".color-swatch");
+    if (swatch) swatch.style.background = color;
+    checkbox.addEventListener("change", (e) => {
       setCatEnabled(cat, e.target.checked);
       if (grid) grid.refreshPEColors();
     });
@@ -167,9 +183,9 @@ function setupEventListeners() {
       e.preventDefault();
       if (!getIsScrubbing()) transportPause();
     } else if (e.key === "q" || e.key === "u" || e.key === "z") {
-      if (grid.viewport) undoZoom();
+      if (viewportStack.length > 0) undoZoom();
     } else if (e.key === "Escape") {
-      if (grid.viewport) resetZoom();
+      if (viewportStack.length > 0) resetZoom();
     } else if (e.key === "ArrowRight") {
       e.preventDefault();
       transportStepFwd();
@@ -237,6 +253,15 @@ function logicalRectToPERange(x0, y0, x1, y1) {
   return { minRow, maxRow, minCol, maxCol };
 }
 
+function clampPERange(range) {
+  return {
+    minRow: Math.max(0, range.minRow),
+    maxRow: Math.min(grid.rows - 1, range.maxRow),
+    minCol: Math.max(0, range.minCol),
+    maxCol: Math.min(grid.cols - 1, range.maxCol),
+  };
+}
+
 function handleZoomDragStart(e) {
   if (!e.shiftKey || e.button !== 0) return;
   e.preventDefault();
@@ -279,13 +304,7 @@ function handleZoomDragStart(e) {
     const curCss = evtToCanvasCSS(ev);
     const lo = cssToLogical(Math.min(zoomDrag.startCssX, curCss.x), Math.min(zoomDrag.startCssY, curCss.y));
     const hi = cssToLogical(Math.max(zoomDrag.startCssX, curCss.x), Math.max(zoomDrag.startCssY, curCss.y));
-    const range = logicalRectToPERange(lo.x, lo.y, hi.x, hi.y);
-    grid.zoomPreview = {
-      minRow: Math.max(0, range.minRow),
-      maxRow: Math.min(grid.rows - 1, range.maxRow),
-      minCol: Math.max(0, range.minCol),
-      maxCol: Math.min(grid.cols - 1, range.maxCol),
-    };
+    grid.zoomPreview = clampPERange(logicalRectToPERange(lo.x, lo.y, hi.x, hi.y));
     animationLoop.start();
   };
 
@@ -298,7 +317,6 @@ function handleZoomDragStart(e) {
     try { container.releasePointerCapture(ev.pointerId); } catch (_) {}
     overlay.classList.add("hidden");
     grid.zoomPreview = null;
-    suppressNextClick = true;
 
     if (!zoomDrag) return;
     const endCss = evtToCanvasCSS(ev);
@@ -307,19 +325,16 @@ function handleZoomDragStart(e) {
     const range = logicalRectToPERange(lo.x, lo.y, hi.x, hi.y);
     zoomDrag = null;
 
-    const { minRow, maxRow, minCol, maxCol } = range;
+    const { minRow, maxRow, minCol, maxCol } = clampPERange(range);
 
-    // Need at least 2×2 region to zoom (clamp for the size check only)
-    const clampedMaxRow = Math.min(grid.rows - 1, Math.max(0, maxRow));
-    const clampedMaxCol = Math.min(grid.cols - 1, Math.max(0, maxCol));
-    const clampedMinRow = Math.max(0, minRow);
-    const clampedMinCol = Math.max(0, minCol);
-    if (clampedMaxRow - clampedMinRow < 1 || clampedMaxCol - clampedMinCol < 1) {
+    // Need at least 2×2 region to zoom
+    if (maxRow - minRow < 1 || maxCol - minCol < 1) {
       animationLoop.start(); // redraw to clear highlight
       return;
     }
 
     // Push current viewport (or null for full grid) onto the stack before zooming
+    suppressNextClick = true;
     viewportStack.push(grid.viewport ? { ...grid.viewport } : null);
     grid.setViewport(minRow, maxRow, minCol, maxCol);
     updateZoomButtons();

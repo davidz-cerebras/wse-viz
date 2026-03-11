@@ -19,6 +19,8 @@ function _addActiveRamp(path, trX, trY, dimY, dir, isOn, rows, cols, pes) {
   return false;
 }
 
+const DIRECTIONS = ["E", "N", "W", "S"];
+
 // Add a single active ramp triangle to the given Path2D.
 function _addRampTriangle(p, cx, cy, dir, isOn) {
   const s = ARROW_SIZE;
@@ -238,7 +240,7 @@ export class Grid {
       for (let col = minC; col <= maxC; col++) {
         const pe = this.pes[row * cols + col];
         const { cx, cy } = pe;
-        for (const dir of ["E", "N", "W", "S"]) {
+        for (const dir of DIRECTIONS) {
           _addRampTriangle(offPath, cx, cy, dir, false);
           _addRampTriangle(onPath, cx, cy, dir, true);
         }

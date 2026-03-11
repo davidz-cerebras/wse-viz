@@ -16,8 +16,11 @@ export function extractBranches(wavelet) {
   const { hops } = wavelet;
   if (hops.cycles.length === 0) return [];
 
-  // Decode typed arrays into lightweight objects for the hopsByPos Map
+  // Decode typed arrays into lightweight objects.
+  // hopsByPos: keyed by (cycle,x,y) for exact-cycle lookups.
+  // hopsByPE: keyed by (x,y) with hops sorted by cycle, for forward scans.
   const hopsByPos = new Map();
+  const hopsByPE = new Map();
   for (let i = 0; i < hops.cycles.length; i++) {
     const hop = {
       cycle: hops.cycles[i],
@@ -27,37 +30,50 @@ export function extractBranches(wavelet) {
       departing: decodeDeparting(hops.departings[i]),
       consumed: !!hops.consumed[i],
     };
-    const key = `${hop.cycle},${hop.x},${hop.y}`;
-    if (!hopsByPos.has(key)) hopsByPos.set(key, []);
-    hopsByPos.get(key).push(hop);
+    const posKey = `${hop.cycle},${hop.x},${hop.y}`;
+    if (!hopsByPos.has(posKey)) hopsByPos.set(posKey, []);
+    hopsByPos.get(posKey).push(hop);
+
+    const peKey = `${hop.x},${hop.y}`;
+    if (!hopsByPE.has(peKey)) hopsByPE.set(peKey, []);
+    hopsByPE.get(peKey).push(hop);
+  }
+  // Sort each PE's hops by cycle for forward scanning
+  for (const arr of hopsByPE.values()) {
+    if (arr.length > 1) arr.sort((a, b) => a.cycle - b.cycle);
   }
 
   const branches = [];
+  // Track visited (cycle, x, y) arrivals to deduplicate converging branches.
+  // In broadcast patterns, multiple fork branches can arrive at the same PE
+  // at the same cycle; their onward paths are identical, so we only trace one.
+  const visited = new Set();
 
   function getDepartures(cycle, x, y) {
-    const hereHops = hopsByPos.get(`${cycle},${x},${y}`) || [];
-    for (const h of hereHops) {
-      if (h.departing.length > 0) return { dirs: h.departing, depCycle: h.cycle };
-    }
-    for (let dc = 1; dc <= 3; dc++) {
-      const futureHops = hopsByPos.get(`${cycle + dc},${x},${y}`) || [];
-      for (const h of futureHops) {
-        if (h.landing === "-" && h.departing.length > 0) {
-          return { dirs: h.departing, depCycle: h.cycle };
-        }
+    // Scan forward from the arrival cycle at this PE for a departure event
+    const peHops = hopsByPE.get(`${x},${y}`) || [];
+    for (const h of peHops) {
+      if (h.cycle < cycle) continue;
+      // At arrival cycle: check for immediate departure
+      if (h.cycle === cycle && h.departing.length > 0) {
+        return { dirs: h.departing, depCycle: h.cycle };
+      }
+      // After arrival: only consider continuation hops (landing="-")
+      if (h.cycle > cycle && h.landing === "-" && h.departing.length > 0) {
+        return { dirs: h.departing, depCycle: h.cycle };
       }
     }
     return null;
   }
 
   function isConsumedWithDepartures(cycle, x, y) {
-    // Check the hop at the arrival cycle and a few cycles after (the wavelet
-    // may have separate hop records for arrival and departure at the same PE)
-    for (let dc = 0; dc <= 3; dc++) {
-      const hereHops = hopsByPos.get(`${cycle + dc},${x},${y}`) || [];
-      for (const h of hereHops) {
-        if (h.consumed && h.departing.length > 0) return true;
-      }
+    // Scan forward from arrival cycle for a hop that is both consumed and departing
+    const peHops = hopsByPE.get(`${x},${y}`) || [];
+    for (const h of peHops) {
+      if (h.cycle < cycle) continue;
+      if (h.consumed && h.departing.length > 0) return true;
+      // Stop if we've passed continuation hops (new landing = new wavelet visit)
+      if (h.cycle > cycle && h.landing !== "-") break;
     }
     return false;
   }
@@ -70,15 +86,13 @@ export function extractBranches(wavelet) {
     return null;
   }
 
-  function traceBranch(startCycle, startX, startY, arriveDir) {
-    const waypoints = [{ cycle: startCycle, x: startX, y: startY, arriveDir, departDir: null, depCycle: null }];
-    let cx = startX, cy = startY, cc = startCycle;
-    continueTrace(waypoints, cx, cy, cc);
-  }
-
   function continueTrace(waypoints, cx, cy, cc) {
-
     for (;;) {
+      // Deduplicate: if another branch already traced from this (cycle, x, y), stop
+      const visitKey = `${cc},${cx},${cy}`;
+      if (visited.has(visitKey)) break;
+      visited.add(visitKey);
+
       const dep = getDepartures(cc, cx, cy);
       if (!dep) break;
 
@@ -90,6 +104,9 @@ export function extractBranches(wavelet) {
         if (!d) continue;
         const nx = fromX + d[0], ny = fromY + d[1];
         const nc = dep.depCycle + 1;
+
+        // Skip if the destination PE at this cycle was already reached by another branch
+        if (visited.has(`${nc},${nx},${ny}`)) continue;
 
         if (!followed) {
           // Record departure on the current waypoint
@@ -105,20 +122,17 @@ export function extractBranches(wavelet) {
           // same on-ramp as the parent (using the parent's arriveDir), then
           // crosses to this fork's off-ramp direction. This makes the packet
           // visually diverge from the parent — one dot becomes two.
-          // The fork PE is the second-to-last waypoint (the last one is the next PE
-          // that was just pushed for the main branch's first direction)
           const forkPeWp = waypoints[waypoints.length - 2];
-          const fnx = fromX + d[0], fny = fromY + d[1], fnc = dep.depCycle + 1;
-          const nextArriveDir = getLandingDir(fnc, fnx, fny) || DIR_OPPOSITE[dir];
+          const nextArriveDir = getLandingDir(nc, nx, ny) || DIR_OPPOSITE[dir];
           const forkStart = {
             cycle: forkPeWp.cycle, x: fromX, y: fromY,
             arriveDir: forkPeWp.arriveDir, departDir: dir, depCycle: dep.depCycle,
           };
           const forkDest = {
-            cycle: fnc, x: fnx, y: fny,
+            cycle: nc, x: nx, y: ny,
             arriveDir: nextArriveDir, departDir: null, depCycle: null,
           };
-          continueTrace([forkStart, forkDest], fnx, fny, fnc);
+          continueTrace([forkStart, forkDest], nx, ny, nc);
         }
       }
 
@@ -126,19 +140,17 @@ export function extractBranches(wavelet) {
       // at this PE, create a short branch that terminates here (the CE delivery).
       // The dot visually forks: one continues to the next PE, one stays here.
       // Check the arrival cycle at this PE (consumePeWp.cycle), not the departure cycle
-      if (waypoints.length < 2) continue;
-      const arrivalCycle = waypoints[waypoints.length - 2].cycle;
-      if (followed && isConsumedWithDepartures(arrivalCycle, fromX, fromY)) {
-        const consumePeWp = waypoints[waypoints.length - 2];
-        branches.push([
-          // Start at the on-ramp (same arrival as the parent branch)
-          { cycle: consumePeWp.cycle, x: fromX, y: fromY,
-            arriveDir: consumePeWp.arriveDir, departDir: null, depCycle: null },
-          // Terminal waypoint: the dot lingers at the on-ramp for one cycle,
-          // visually indicating consumption while the forwarded dot moves on.
-          { cycle: dep.depCycle + 1, x: fromX, y: fromY,
-            arriveDir: consumePeWp.arriveDir, departDir: null, depCycle: null },
-        ]);
+      if (waypoints.length >= 2 && followed) {
+        const arrivalCycle = waypoints[waypoints.length - 2].cycle;
+        if (isConsumedWithDepartures(arrivalCycle, fromX, fromY)) {
+          const consumePeWp = waypoints[waypoints.length - 2];
+          branches.push([
+            { cycle: consumePeWp.cycle, x: fromX, y: fromY,
+              arriveDir: consumePeWp.arriveDir, departDir: null, depCycle: null },
+            { cycle: dep.depCycle + 1, x: fromX, y: fromY,
+              arriveDir: consumePeWp.arriveDir, departDir: null, depCycle: null },
+          ]);
+        }
       }
 
       if (!followed) break;
@@ -149,7 +161,9 @@ export function extractBranches(wavelet) {
     }
   }
 
-  traceBranch(hops.cycles[0], hops.xs[0], hops.ys[0], LANDING_DECODE[hops.landings[0]]);
+  const startWp = { cycle: hops.cycles[0], x: hops.xs[0], y: hops.ys[0],
+    arriveDir: LANDING_DECODE[hops.landings[0]], departDir: null, depCycle: null };
+  continueTrace([startWp], startWp.x, startWp.y, startWp.cycle);
 
   return branches;
 }

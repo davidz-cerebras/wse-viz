@@ -21,7 +21,10 @@ let peTraceScrollLock = false; // prevents scroll-handler re-entrancy
 let lastReconstructedCycle = -1; // tracks when to call reconstructStateAtCycle
 let maxCycleStr = ""; // cached String(maxCycle) for updateScrubUI
 
-let wavScanStart = 0; // low-water mark: wavelets before this index have expired
+
+// Server mode state
+let serverMode = false;
+let pendingStateFetch = null; // in-flight /api/state fetch, or null
 
 /**
  * Strip dot-suffixes (.NF, .F, .T, etc.) from an opcode name and return
@@ -31,6 +34,57 @@ let wavScanStart = 0; // low-water mark: wavelets before this index have expired
 function _baseOpName(op) {
   const base = (op || "?").split(".")[0];
   return base === "NOP" ? null : base;
+}
+
+/**
+ * Build flat per-cycle state arrays from a sparse PE state entry via forward-carry.
+ * Returns { busyArr, opArr, predArr, stallReasonArr, opCounts }.
+ */
+function _buildFlatPEState(entry, td, minCycle, maxCycle) {
+  const totalCycles = maxCycle - minCycle + 1;
+  const busyArr = new Uint8Array(totalCycles);
+  const opArr = new Array(totalCycles).fill(null);
+  const predArr = new Array(totalCycles).fill(null);
+  const stallReasonArr = new Array(totalCycles).fill(null);
+
+  if (entry) {
+    let evtIdx = 0;
+    let curBusy = 0, curOp = null, curPred = null;
+    let curStallReason = null, curStallCycle = -1;
+    for (let i = 0; i < totalCycles; i++) {
+      const cycle = minCycle + i;
+      while (evtIdx < entry.length && entry.cycles[evtIdx] <= cycle) {
+        if (entry.stall[evtIdx]) {
+          curStallReason = entry.stallReasons[evtIdx];
+          curStallCycle = entry.cycles[evtIdx];
+        } else {
+          const opId = entry.opIds[evtIdx];
+          if (td.opNopLookup[opId]) { curBusy = 0; }
+          else { curBusy = entry.busy[evtIdx]; }
+          curOp = td.opLookup[opId] ?? "";
+          curPred = td.predLookup[entry.predIds[evtIdx]] ?? "";
+          if (entry.cycles[evtIdx] > curStallCycle) curStallReason = null;
+        }
+        evtIdx++;
+      }
+      if (curBusy) {
+        busyArr[i] = 1; opArr[i] = curOp; predArr[i] = curPred;
+      } else if (curOp) {
+        opArr[i] = curOp; predArr[i] = curPred;
+      }
+      stallReasonArr[i] = curStallReason;
+    }
+  }
+
+  const opCounts = new Map();
+  for (let i = 0; i < totalCycles; i++) {
+    if (busyArr[i]) {
+      const o = _baseOpName(opArr[i]);
+      if (o) opCounts.set(o, (opCounts.get(o) || 0) + 1);
+    }
+  }
+
+  return { busyArr, opArr, predArr, stallReasonArr, opCounts, totalCycles };
 }
 
 export function initReplay(deps) {
@@ -52,7 +106,6 @@ export function getReplayState() {
 export function getIsScrubbing() {
   return isScrubbing;
 }
-
 
 function getBranches(wv) {
   if (!wv._branches) wv._branches = extractBranches(wv);
@@ -87,17 +140,12 @@ function sendLandingPackets(landingRange, msPerCycle, startTime) {
  */
 function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
   if (!state) return;
+  if (serverMode) { reconstructFromServer(targetCycle); return; }
   const td = traceData;
   if (!td) return;
 
+  // 1. Reconstruct PE execution and stall state.
   grid.clearPackets();
-
-  // Retreat wavelet scan low-water mark on backward seek
-  if (targetCycle < lastReconstructedCycle) {
-    while (wavScanStart > 0 && td.waveletList[wavScanStart - 1].lastCycle >= targetCycle) {
-      wavScanStart--;
-    }
-  }
 
   const rows = grid.rows;
   const cols = grid.cols;
@@ -142,14 +190,20 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
   }
 
   // 2. Create packets for in-flight wavelets or DataPackets for old traces.
-  // waveletList is sorted by firstCycle. Binary search for upper bound,
-  // low-water mark skips expired wavelets from the bottom.
+  // waveletList is sorted by firstCycle. Two binary searches give the scan range:
+  //   - Upper bound: first index where firstCycle > targetCycle (exact)
+  //   - Lower bound: first index where prefMaxLastCycle >= targetCycle
+  //     (prefMaxLastCycle[i] = max of lastCycle[0..i]; monotonically non-decreasing,
+  //     so binary-searchable). Everything before this index is guaranteed dead.
+  //     Some dead wavelets after the lower bound may be included but are filtered
+  //     by the per-wavelet lastCycle check in the loop.
   if (td.waveletList) {
     const wvList = td.waveletList;
     const wvLen = wvList.length;
+    const prefMax = td.wavPrefMaxLastCycle;
 
-    // Binary search: find first index where firstCycle > targetCycle
-    let lo = wavScanStart, hi = wvLen;
+    // Upper bound: first index where firstCycle > targetCycle
+    let lo = 0, hi = wvLen;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
       if (wvList[mid].firstCycle <= targetCycle) lo = mid + 1;
@@ -157,12 +211,17 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
     }
     const upperBound = lo;
 
-    // Advance low-water mark past expired wavelets
-    while (wavScanStart < upperBound && wvList[wavScanStart].lastCycle < targetCycle) {
-      wavScanStart++;
+    // Lower bound: first index where prefMaxLastCycle >= targetCycle
+    // prefMax is non-decreasing; everything before lowerBound has max lastCycle < targetCycle
+    lo = 0; hi = upperBound;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (prefMax[mid] < targetCycle) lo = mid + 1;
+      else hi = mid;
     }
+    const lowerBound = lo;
 
-    for (let wi = wavScanStart; wi < upperBound; wi++) {
+    for (let wi = lowerBound; wi < upperBound; wi++) {
       const wv = wvList[wi];
       if (wv.lastCycle < targetCycle) continue;
       const branches = getBranches(wv);
@@ -193,6 +252,11 @@ export function selectPE(row, col, traceX, traceY) {
   // Clean up previous PE selection before switching to the new one
   if (selectedPE) deselectPE();
 
+  if (serverMode) {
+    selectPEFromServer(row, col, traceX, traceY);
+    return;
+  }
+
   const key = `${traceX},${traceY}`;
   const td = traceData;
   const entry = td.peStateIndex.get(key);
@@ -203,69 +267,9 @@ export function selectPE(row, col, traceX, traceY) {
   peTraceScrollLock = false;
 
   const { minCycle, maxCycle } = state;
-  const totalCycles = maxCycle - minCycle + 1;
+  const flat = _buildFlatPEState(entry, td, minCycle, maxCycle);
 
-  // Build flat per-cycle state arrays:
-  //   E stage (Execute): busyArr + opArr + predArr
-  //   Stalls: stallReasonArr (array of {reason, type} objects, or null)
-  const busyArr = new Uint8Array(totalCycles);
-  const opArr = new Array(totalCycles).fill(null);
-  const predArr = new Array(totalCycles).fill(null);
-  const stallReasonArr = new Array(totalCycles).fill(null);
-
-  // Fill from peStateIndex events (forward-carry)
-  if (entry) {
-    let evtIdx = 0;
-    let curBusy = 0;
-    let curOp = null;
-    let curPred = null;
-    let curStallReason = null;
-    let curStallCycle = -1;
-    for (let i = 0; i < totalCycles; i++) {
-      const cycle = minCycle + i;
-      while (evtIdx < entry.length && entry.cycles[evtIdx] <= cycle) {
-        if (entry.stall[evtIdx]) {
-          curStallReason = entry.stallReasons[evtIdx];
-          curStallCycle = entry.cycles[evtIdx];
-        } else {
-          const opId = entry.opIds[evtIdx];
-          if (td.opNopLookup[opId]) {
-            // NOP: visually idle in the grid, but still show in trace text
-            curBusy = 0;
-          } else {
-            curBusy = entry.busy[evtIdx];
-          }
-          curOp = td.opLookup[opId] ?? "";
-          curPred = td.predLookup[entry.predIds[evtIdx]] ?? "";
-          // Clear stall only if this exec is at a later cycle — same-cycle
-          // stall+exec coexist (stall at issue stage, exec at EX stage)
-          if (entry.cycles[evtIdx] > curStallCycle) curStallReason = null;
-        }
-        evtIdx++;
-      }
-      if (curBusy) {
-        busyArr[i] = 1;
-        opArr[i] = curOp;
-        predArr[i] = curPred;
-      } else if (curOp) {
-        // NOP: show op text in trace panel but not as busy
-        opArr[i] = curOp;
-        predArr[i] = curPred;
-      }
-      stallReasonArr[i] = curStallReason;
-    }
-  }
-
-  // Count cycles per opcode for the bar chart (strip .NF/.T suffixes)
-  const opCounts = new Map();
-  for (let i = 0; i < totalCycles; i++) {
-    if (busyArr[i]) {
-      const o = _baseOpName(opArr[i]);
-      if (o) opCounts.set(o, (opCounts.get(o) || 0) + 1);
-    }
-  }
-
-  selectedPE = { row, col, traceX, traceY, minCycle, totalCycles, busyArr, stallReasonArr, opArr, predArr, opCounts };
+  selectedPE = { row, col, traceX, traceY, minCycle, ...flat };
 
   // Update panel header
   els.tracePanel.querySelector("h2").textContent = `P${traceX}.${traceY} Trace`;
@@ -435,6 +439,37 @@ function setupPETraceScroll() {
   };
 }
 
+let peSelectGeneration = 0;
+
+async function selectPEFromServer(row, col, traceX, traceY) {
+  grid.selectPE(row, col);
+  els.tracePanel.classList.remove("hidden");
+  requestAnimationFrame(resizeCanvas);
+
+  const myGen = ++peSelectGeneration;
+  const td = traceData;
+  const { minCycle, maxCycle } = state;
+
+  let resp;
+  try { resp = await fetch(`/api/pe-trace?x=${traceX}&y=${traceY}`); }
+  catch { return; }
+  if (myGen !== peSelectGeneration) return; // stale response — user clicked another PE
+
+  let data;
+  try { data = await resp.json(); }
+  catch { return; }
+  if (myGen !== peSelectGeneration) return;
+
+  const entry = data.found ? data.entry : null;
+  const flat = _buildFlatPEState(entry, td, minCycle, maxCycle);
+
+  selectedPE = { row, col, traceX, traceY, minCycle, ...flat };
+  els.tracePanel.querySelector("h2").textContent = `PE (${traceX}, ${traceY})`;
+  renderOpChart();
+  renderPETraceWindow(state.currentCycle);
+  setupPETraceScroll();
+}
+
 export function deselectPE() {
   if (!selectedPE) return;
   grid.deselectAllPEs();
@@ -545,7 +580,6 @@ export function updateReplayTick(timestamp) {
     updateTransportUI();
   }
 }
-
 
 // --- Transport state machine ---
 // States: forward-play, reverse-play, forward-paused, reverse-paused
@@ -687,12 +721,14 @@ function seekToCycle(targetCycle) {
   updatePETraceHighlight();
 
   // For old traces without wavelet data, show frozen DataPackets for the target cycle
-  const td = traceData;
-  if (!td.hasWaveletData) {
-    const range = TraceParser.getLandingRange(td.landingIndex, targetCycle);
-    if (range) {
-      const msPerCycle = 1000 / state.speed;
-      sendLandingPackets(range, msPerCycle, Infinity);
+  if (!serverMode) {
+    const td = traceData;
+    if (!td.hasWaveletData) {
+      const range = TraceParser.getLandingRange(td.landingIndex, targetCycle);
+      if (range) {
+        const msPerCycle = 1000 / state.speed;
+        sendLandingPackets(range, msPerCycle, Infinity);
+      }
     }
   }
 
@@ -708,12 +744,118 @@ export function cancelReplay() {
   state = null;
   traceData = null;
   lastReconstructedCycle = -1;
-  wavScanStart = 0;
   isScrubbing = false;
   scrubWasPlaying = false;
+  serverMode = false;
+  pendingStateFetch = null;
   maxCycleStr = "";
   showPanel(null);
   els.cycleDisplay.textContent = "";
+}
+
+// ---------------------------------------------------------------------------
+// Server mode — state is fetched from /api/* instead of computed locally
+// ---------------------------------------------------------------------------
+
+export function initServerMode(meta, setGrid) {
+  cancelReplay();
+  serverMode = true;
+
+  const { entries: opEntryLookup, nops: opNopLookup } = buildOpEntryLookup(meta.opLookup);
+
+  traceData = {
+    dimX: meta.dimX,
+    dimY: meta.dimY,
+    opLookup: meta.opLookup,
+    opEntryLookup,
+    opNopLookup,
+    predLookup: meta.predLookup,
+    hasWaveletData: meta.hasWaveletData,
+    minCycle: meta.minCycle,
+    maxCycle: meta.maxCycle,
+    // These are null in server mode — data lives on the server
+    peStateIndex: null,
+    peStateList: null,
+    waveletList: null,
+    landingIndex: null,
+  };
+
+  setGrid(meta.dimY, meta.dimX);
+  grid.showRamps = meta.hasWaveletData;
+  showPanel("trace");
+
+  const { minCycle, maxCycle } = meta;
+  maxCycleStr = maxCycle.toLocaleString();
+  const speed = 4;
+  els.speedDisplay.textContent = `${speed} Hz`;
+
+  state = {
+    currentCycle: minCycle,
+    speed,
+    playing: false,
+    direction: 1,
+    lastTickTime: performance.now(),
+    minCycle,
+    maxCycle,
+  };
+
+  els.scrubBar.min = minCycle;
+  els.scrubBar.max = maxCycle;
+  els.scrubBar.value = minCycle;
+  updateTransportUI();
+  seekToCycle(minCycle);
+}
+
+/** Apply a /api/state response to the grid. */
+function applyServerState(data) {
+  const td = traceData;
+  grid.clearPackets();
+
+  // Apply PE states
+  const cols = grid.cols;
+  const pes = grid.pes;
+  // Reset all PEs to idle first
+  for (const pe of pes) pe.setBusy(false, null, null);
+
+  for (const rec of data.pes) {
+    const [row, col, busy, opId, stallType, stallReason] = rec;
+    if (row >= grid.rows || col >= cols) continue;
+    const pe = pes[row * cols + col];
+    if (busy || opId) {
+      pe.setBusy(!!busy, td.opLookup[opId] ?? null, td.opEntryLookup[opId] ?? null);
+    }
+    if (stallType) {
+      grid.setPEStall(row, col, stallType, stallReason);
+    }
+  }
+
+  // Create TracedPackets from wavelet waypoints
+  for (const wvData of data.wavelets) {
+    const [color, ctrl, lf, branchTuples] = wvData;
+    const waypoints = branchTuples.map(t => ({
+      cycle: t[0], x: t[1], y: t[2],
+      arriveDir: t[3], departDir: t[4], depCycle: t[5],
+    }));
+    const pkt = new TracedPacket(waypoints, td.dimY, color, ctrl, lf);
+    pkt.syncTo(state.currentCycle, state.currentCycle);
+    grid.packets.push(pkt);
+  }
+}
+
+/** Server-mode version of reconstructStateAtCycle. */
+function reconstructFromServer(targetCycle) {
+  if (pendingStateFetch) return; // don't spam requests
+  pendingStateFetch = fetch(`/api/state?cycle=${targetCycle}`)
+    .then(r => r.json())
+    .then(data => {
+      pendingStateFetch = null;
+      // Only apply if we haven't moved far past this cycle
+      if (!state) return;
+      applyServerState(data);
+      lastReconstructedCycle = data.cycle;
+      animationLoop.start();
+    })
+    .catch(() => { pendingStateFetch = null; });
 }
 
 export function handleTraceFile(event, setGrid) {
@@ -721,13 +863,11 @@ export function handleTraceFile(event, setGrid) {
   if (!file) return;
   event.target.value = "";
 
-  const myGen = ++handleTraceGeneration;
+  // Reset all replay state so playback controls are inert during loading,
+  // and so a thrown exception doesn't leave stale state behind.
+  cancelReplay();
 
-  // Null out stale replay/trace state so playback controls are inert during
-  // loading, and so a thrown exception doesn't leave stale traceData behind.
-  deselectPE();
-  state = null;
-  traceData = null;
+  const myGen = ++handleTraceGeneration;
 
   // Show the playback bar with loading progress — hide playback controls
   // since they're inert during loading (state is null).
@@ -800,6 +940,7 @@ export function handleTraceFile(event, setGrid) {
 
       // Pre-sort wavelets by first cycle for fast range filtering.
       let waveletList = null;
+      let wavPrefMaxLastCycle = null;
       if (d.hasWaveletData) {
         waveletList = d.waveletEntries.map(e => e[1]);
         for (const wv of waveletList) {
@@ -807,6 +948,15 @@ export function handleTraceFile(event, setGrid) {
           wv.lastCycle = wv.hops.cycles[wv.hops.cycles.length - 1];
         }
         waveletList.sort((a, b) => a.firstCycle - b.firstCycle);
+        // Prefix max of lastCycle: prefMax[i] = max(lastCycle[0..i]).
+        // Non-decreasing, enabling binary search for the lower bound of
+        // live wavelets at any cycle (everything before lowerBound is dead).
+        wavPrefMaxLastCycle = new Float64Array(waveletList.length);
+        let runMax = -Infinity;
+        for (let i = 0; i < waveletList.length; i++) {
+          runMax = Math.max(runMax, waveletList[i].lastCycle);
+          wavPrefMaxLastCycle[i] = runMax;
+        }
       }
 
       const { entries: opEntryLookup, nops: opNopLookup } = buildOpEntryLookup(d.opLookup);
@@ -822,6 +972,7 @@ export function handleTraceFile(event, setGrid) {
         opNopLookup,
         predLookup: d.predLookup,
         waveletList,
+        wavPrefMaxLastCycle,
         hasWaveletData: d.hasWaveletData,
         minCycle: d.minCycle,
         maxCycle: d.maxCycle,
@@ -838,7 +989,6 @@ export function handleTraceFile(event, setGrid) {
       els.playbackControls.classList.remove("hidden");
 
       lastReconstructedCycle = -1;
-      wavScanStart = 0;
       traceData = td;
       setGrid(td.dimY, td.dimX);
       grid.showRamps = td.hasWaveletData;

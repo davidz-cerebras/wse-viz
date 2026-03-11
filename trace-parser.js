@@ -145,15 +145,15 @@ export class TraceParser {
   // Single-threaded parse: delegates to indexSegment for the full file, then compacts.
   static async index(file, onProgress) {
     const seg = await TraceParser.indexSegment(file, 0, file.size, true, onProgress);
-    const peStateIndex = TraceParser._compactPEState(new Map(seg.peStateTemp));
-    const waveletIndex = TraceParser._compactWavelets(new Map(seg.waveletTemp));
+    const peStateIndex = TraceParser._compactPEState(seg.peStateTemp);
+    const waveletIndex = TraceParser._compactWavelets(seg.waveletTemp);
     const landingIndex = TraceParser._compactLandings(
       seg.tmpLandCycles, seg.tmpLandXs, seg.tmpLandYs, seg.tmpLandColors, seg.tmpLandDirs);
     return {
       dimX: seg.dimX, dimY: seg.dimY, landingIndex, peStateIndex,
       opLookup: seg.opLookup, predLookup: seg.predLookup,
       waveletIndex, hasWaveletData: seg.hasWaveletData,
-      minCycle: seg.minCycle, maxCycle: seg.maxCycle, totalEvents: seg.totalEvents,
+      minCycle: seg.minCycle, maxCycle: seg.maxCycle,
     };
   }
 
@@ -163,7 +163,6 @@ export class TraceParser {
   static async indexSegment(file, startByte, endByte, isFirst, onProgress) {
     let dimX = 0, dimY = 0;
     let minCycle = Infinity, maxCycle = -Infinity;
-    let totalEvents = 0;
 
     const prevExState = new Map();
     const peStateTemp = new Map();
@@ -259,7 +258,6 @@ export class TraceParser {
 
       const landing = parseLanding(line);
       if (landing) {
-        totalEvents++;
         tmpLandCycles.push(landing.cycle); tmpLandXs.push(landing.x);
         tmpLandYs.push(landing.y); tmpLandColors.push(landing.color);
         tmpLandDirs.push(landing.dirEncoded);
@@ -268,7 +266,7 @@ export class TraceParser {
 
       const wv = parseWavelet(line);
       if (wv) {
-        hasWaveletData = true; totalEvents++;
+        hasWaveletData = true;
         let entry = waveletTemp.get(wv.ident);
         if (!entry) {
           entry = { ident: wv.ident, color: wv.color, ctrl: wv.ctrl, lf: wv.lf,
@@ -360,7 +358,7 @@ export class TraceParser {
     for (const [str, id] of predIntern) predLookup[id] = str;
 
     return {
-      dimX, dimY, minCycle, maxCycle, totalEvents, hasWaveletData,
+      dimX, dimY, minCycle, maxCycle, hasWaveletData,
       peStateTemp: [...peStateTemp.entries()],
       waveletTemp: [...waveletTemp.entries()],
       tmpLandCycles, tmpLandXs, tmpLandYs, tmpLandColors, tmpLandDirs,
@@ -371,14 +369,13 @@ export class TraceParser {
   // Merge partial results from N parallel segments into final compacted trace data.
   static mergeSegments(segments, onMergeProgress) {
     let dimX = 0, dimY = 0, minCycle = Infinity, maxCycle = -Infinity;
-    let totalEvents = 0, hasWaveletData = false;
+    let hasWaveletData = false;
 
     // 1. Scalars: take from first segment that has dims; merge cycle range
     for (const seg of segments) {
       if (seg.dimX > 0 && dimX === 0) { dimX = seg.dimX; dimY = seg.dimY; }
       if (seg.minCycle < minCycle) minCycle = seg.minCycle;
       if (seg.maxCycle > maxCycle) maxCycle = seg.maxCycle;
-      totalEvents += seg.totalEvents;
       if (seg.hasWaveletData) hasWaveletData = true;
     }
 
@@ -544,7 +541,7 @@ export class TraceParser {
     mp("Done", 100);
 
     return { dimX, dimY, landingIndex, peStateIndex, opLookup, predLookup,
-             waveletIndex, hasWaveletData, minCycle, maxCycle, totalEvents };
+             waveletIndex, hasWaveletData, minCycle, maxCycle };
   }
 
   // Sort parallel arrays by the cycles array. No-op if already sorted.
@@ -567,7 +564,7 @@ export class TraceParser {
 
   static _compactPEState(peStateMap, onProgress) {
     const peStateIndex = new Map();
-    const total = peStateMap.size;
+    const total = peStateMap.size ?? peStateMap.length;
     let idx = 0;
     for (const [key, pe] of peStateMap) {
       if (onProgress && idx % 200 === 0) onProgress(idx / total);
@@ -588,7 +585,7 @@ export class TraceParser {
 
   static _compactWavelets(waveletMap, onProgress) {
     const waveletIndex = new Map();
-    const total = waveletMap.size;
+    const total = waveletMap.size ?? waveletMap.length;
     let idx = 0;
     for (const [ident, entry] of waveletMap) {
       if (onProgress && idx % 500 === 0) onProgress(idx / total);
