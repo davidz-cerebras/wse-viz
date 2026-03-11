@@ -78,14 +78,14 @@ function init() {
   initDemo({ grid, els, animationLoop, cancelReplay, showPanel, setGrid });
   setupEventListeners();
 
-  // Detect server mode: if /api/meta responds, skip the file picker and load from server.
-  // Hide controls immediately to avoid a flash; show them back if not in server mode.
-  const controlsEl = document.querySelector(".controls");
-  controlsEl.style.display = "none";
+  // Detect server mode: if /api/meta responds, load from server.
+  // Demo controls start hidden (HTML `hidden` attr) to prevent flash;
+  // shown only after confirming we're not in server mode.
+  const demoControls = document.querySelectorAll(".demo-ctrl");
   fetch("/api/meta").then(r => r.ok ? r.json() : null).then(meta => {
-    if (!meta) { controlsEl.style.display = ""; return; }
+    if (!meta) { for (const el of demoControls) el.hidden = false; return; }
     initServerMode(meta, setGrid);
-  }).catch(() => { controlsEl.style.display = ""; });
+  }).catch(() => { for (const el of demoControls) el.hidden = false; });
 }
 
 function update(timestamp) {
@@ -108,9 +108,12 @@ function draw(timestamp) {
   grid.draw(ctx, timestamp);
 }
 
+let _dprMql = null;
+function _onDPRChange() { resizeCanvas(); watchDPR(); }
 function watchDPR() {
-  const mq = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
-  mq.addEventListener("change", () => { resizeCanvas(); watchDPR(); }, { once: true });
+  if (_dprMql) _dprMql.removeEventListener("change", _onDPRChange);
+  _dprMql = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+  _dprMql.addEventListener("change", _onDPRChange, { once: true });
 }
 
 function setupEventListeners() {
@@ -125,7 +128,8 @@ function setupEventListeners() {
     const pbH = els.playbackBar.classList.contains("hidden") ? 0 : els.playbackBar.offsetHeight;
     document.documentElement.style.setProperty("--playback-height", pbH + "px");
   }
-  new MutationObserver(updateSidebarBounds).observe(els.playbackBar, { attributes: true, attributeFilter: ["class"] });
+  const sidebarObserver = new MutationObserver(updateSidebarBounds);
+  sidebarObserver.observe(els.playbackBar, { attributes: true, attributeFilter: ["class"] });
   sidebarBtn.addEventListener("click", () => {
     updateSidebarBounds();
     sidebar.classList.toggle("open");
@@ -368,8 +372,8 @@ function resetZoom() {
 
 function updateZoomButtons() {
   const zoomed = !!grid.viewport;
-  els.resetZoomBtn.classList.toggle("hidden", !zoomed);
   els.undoZoomBtn.classList.toggle("hidden", !zoomed);
+  els.resetZoomBtn.classList.toggle("hidden", !zoomed);
 }
 
 function applyViewport() {
@@ -393,6 +397,10 @@ function showPanel(panel) {
   // Trace panel is shown/hidden by selectPE/deselectPE, not by showPanel
   if (panel !== "trace") els.tracePanel.classList.add("hidden");
   els.playbackBar.classList.toggle("hidden", panel !== "trace");
+  // In trace mode, hide demo/load buttons; in other modes restore them
+  for (const el of document.querySelectorAll(".demo-ctrl")) {
+    el.hidden = panel === "trace";
+  }
   // Refit canvas after panel visibility changes the available space
   requestAnimationFrame(resizeCanvas);
 }

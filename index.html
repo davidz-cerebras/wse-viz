@@ -23,18 +23,20 @@
           <button id="sidebarBtn" class="icon-btn sidebar-btn" title="Toggle sidebar">&#9776;</button>
           <h1>Wafer-Scale Engine Visualizer</h1>
         </div>
+        <span id="serverStatus" class="server-status hidden"></span>
         <div class="controls">
-          <button id="startBtn" class="btn">Random</button>
-          <button id="allReduceFullBtn" class="btn">AllReduce</button>
-          <button id="spmvBtn" class="btn">SpMV</button>
-          <button id="cgBtn" class="btn">Conjugate Gradient</button>
-          <span class="controls-separator">|</span>
-          <label class="btn file-input-label" for="traceFileInput">
+          <button id="startBtn" class="btn demo-ctrl" hidden>Random</button>
+          <button id="allReduceFullBtn" class="btn demo-ctrl" hidden>AllReduce</button>
+          <button id="spmvBtn" class="btn demo-ctrl" hidden>SpMV</button>
+          <button id="cgBtn" class="btn demo-ctrl" hidden>Conjugate Gradient</button>
+          <span class="controls-separator demo-ctrl" hidden>|</span>
+          <label class="btn file-input-label demo-ctrl" for="traceFileInput" hidden>
             Load Trace
             <input type="file" id="traceFileInput" accept=".log,.txt,.zst" hidden />
           </label>
+          <button id="undoZoomBtn" class="btn reset-zoom-btn hidden">Undo Zoom</button>
+          <button id="resetZoomBtn" class="btn reset-zoom-btn hidden">Reset Zoom</button>
         </div>
-        <span id="serverStatus" class="server-status hidden"></span>
       </header>
       <main>
         <div class="canvas-container">
@@ -129,8 +131,6 @@
           <button id="speedDown" class="icon-btn speed-btn" title="Halve speed">&minus;</button>
           <span id="speedDisplay" class="speed-display">4 Hz</span>
           <button id="speedUp" class="icon-btn speed-btn" title="Double speed">+</button>
-          <button id="undoZoomBtn" class="btn reset-zoom-btn hidden">Undo Zoom</button>
-          <button id="resetZoomBtn" class="btn reset-zoom-btn hidden">Reset Zoom</button>
         </div>
       </div>
     </div>

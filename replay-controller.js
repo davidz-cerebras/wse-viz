@@ -24,6 +24,7 @@ let maxCycleStr = ""; // cached String(maxCycle) for updateScrubUI
 
 // Server mode state
 let serverMode = false;
+let serverGeneration = 0; // incremented on cancel; stale prefetch callbacks check this
 let pendingStateFetch = null; // in-flight /api/state fetch, or null
 let serverStateCache = new Map(); // cycle → parsed /api/state response
 let prefetchInFlight = 0; // number of prefetch requests currently in-flight
@@ -179,31 +180,10 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
   //     so binary-searchable). Everything before this index is guaranteed dead.
   //     Some dead wavelets after the lower bound may be included but are filtered
   //     by the per-wavelet lastCycle check in the loop.
-  if (td.waveletList) {
+  const wvRange = TraceParser.findLiveWaveletRange(td.waveletList, td.wavPrefMaxLastCycle, targetCycle);
+  if (wvRange) {
     const wvList = td.waveletList;
-    const wvLen = wvList.length;
-    const prefMax = td.wavPrefMaxLastCycle;
-
-    // Upper bound: first index where firstCycle > targetCycle
-    let lo = 0, hi = wvLen;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (wvList[mid].firstCycle <= targetCycle) lo = mid + 1;
-      else hi = mid;
-    }
-    const upperBound = lo;
-
-    // Lower bound: first index where prefMaxLastCycle >= targetCycle
-    // prefMax is non-decreasing; everything before lowerBound has max lastCycle < targetCycle
-    lo = 0; hi = upperBound;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (prefMax[mid] < targetCycle) lo = mid + 1;
-      else hi = mid;
-    }
-    const lowerBound = lo;
-
-    for (let wi = lowerBound; wi < upperBound; wi++) {
+    for (let wi = wvRange.lowerBound; wi < wvRange.upperBound; wi++) {
       const wv = wvList[wi];
       if (wv.lastCycle < targetCycle) continue;
       const branches = getBranches(wv);
@@ -811,11 +791,14 @@ export function cancelReplay() {
   isScrubbing = false;
   scrubWasPlaying = false;
   serverMode = false;
+  serverGeneration++;
   pendingStateFetch = null;
   serverStateCache.clear();
   prefetchInFlight = 0;
   serverError = false;
   maxCycleStr = "";
+  _lastPrefetchGradient = "";
+  els.scrubBar.style.background = "";
   showPanel(null);
   els.cycleDisplay.textContent = "";
 }
@@ -934,8 +917,11 @@ function reconstructFromServer(targetCycle) {
       if (serverError) { serverError = false; clearServerStatus(); }
       if (!state) return;
       serverStateCache.set(targetCycle, data);
+      // If the user scrubbed away while the fetch was in-flight, cache the
+      // data but don't apply it — the next reconstruction will use the cache.
+      if (state.currentCycle !== targetCycle) { animationLoop.start(); return; }
       applyServerState(data);
-      lastReconstructedCycle = data.cycle;
+      lastReconstructedCycle = targetCycle;
       // Reset tick time so the next updateReplayTick doesn't see the time
       // spent waiting for the fetch as elapsed playback time.
       if (state.playing) state.lastTickTime = performance.now();
@@ -980,6 +966,7 @@ function serverPrefetch() {
     return -1; // fully cached
   }
 
+  const gen = serverGeneration;
   while (prefetchInFlight < SERVER_MAX_PREFETCH_INFLIGHT) {
     const cycle = nextUncached();
     if (cycle < 0) break; // everything cached
@@ -988,14 +975,17 @@ function serverPrefetch() {
     prefetchInFlight++;
     fetchServerState(cycle)
       .then(data => {
+        if (gen !== serverGeneration) return; // stale session
         prefetchInFlight--;
         serverStateCache.set(cycle, data);
         updatePrefetchIndicator();
         serverPrefetch(); // keep filling
       })
       .catch(() => {
+        if (gen !== serverGeneration) return; // stale session
         prefetchInFlight--;
         serverStateCache.delete(cycle); // clear the null placeholder
+        serverPrefetch(); // keep trying remaining cycles
       });
   }
 }

@@ -30,6 +30,7 @@ const SYMBOLIC_OPS = {
   FSTDPAE:{ symbol: "ST", sub: "F32", cat: "mem-write" },
   FSTDPAH:{ symbol: "ST", sub: "F16", cat: "mem-write" },
   FCPSS:  { symbol: "CPS", sub: "F32", cat: "fp-arith" },
+  FCPXSS: { symbol: "\u2102", sub: "F32", cat: "fp-arith" },
   FABSS:  { symbol: "ABS", sub: "F32", cat: "fp-arith" },
   FNEGS:  { symbol: "\u2212", sub: "F32", cat: "fp-arith" },
   FMAXS:  { symbol: "MAX", sub: "F32", cat: "fp-arith" },
@@ -73,6 +74,7 @@ const SYMBOLIC_OPS = {
   FMOV16: { symbol: "MOV", sub: "F16" },
   FMOVH:  { symbol: "MOV", sub: "F16" },
   FCPSH:  { symbol: "CPS", sub: "F16", cat: "fp-arith" },
+  FCPXSH: { symbol: "\u2102", sub: "F16", cat: "fp-arith" },
   FABSH:  { symbol: "ABS", sub: "F16", cat: "fp-arith" },
   FNEGH:  { symbol: "\u2212", sub: "F16", cat: "fp-arith" },
   FMAXH:  { symbol: "MAX", sub: "F16", cat: "fp-arith" },
@@ -209,8 +211,38 @@ const SYMBOLIC_OPS = {
   BLK:    { symbol: "BLK", cat: "task" },
   UBLK:   { symbol: "UBLK", cat: "task" },
   YIELD:  { symbol: "YIELD", cat: "task" },
-  YIELDH: { symbol: "YIELDH", cat: "task" },
+  YIELDH: { symbol: "YIELD", sub: "HIGH", cat: "task" },
   JMPT:   { symbol: "JMPT", cat: "task" },
+  IQFLUSH:{ symbol: "IQ", sub: "FLUSH", cat: "task" },
+  OQFLUSH:{ symbol: "OQ", sub: "FLUSH", cat: "task" },
+  // Queue test/query
+  QEMPTY: { symbol: "Q?", sub: "EMPTY", cat: "ctrl" },
+  QFULL:  { symbol: "Q?", sub: "FULL", cat: "ctrl" },
+  QDEPTH: { symbol: "Q#", sub: "DEPTH" },
+  QAVAIL: { symbol: "Q#", sub: "AVAIL" },
+  DFILT:  { symbol: "FILT" },
+  DFLITEQ:{ symbol: "FILT", sub: "EQ", cat: "task" },
+  DFILTNE:{ symbol: "FILT", sub: "NE", cat: "task" },
+  // Data manipulation
+  SELECT16:{ symbol: "SEL", sub: "I16" },
+  SELECT32:{ symbol: "SEL", sub: "I32" },
+  DEP16:  { symbol: "DEP", sub: "I16" },
+  EXTR16: { symbol: "EXTR", sub: "I16" },
+  MERGE:  { symbol: "MERGE", sub: "I16\u2192I32" },
+  MERGEF: { symbol: "MERGE", sub: "I16\u2192I32" },
+  MERGE64:{ symbol: "MERGE", sub: "I32\u2192I64" },
+  MERGEF64:{ symbol: "MERGE", sub: "I32\u2192I64" },
+  WPACK:  { symbol: "CVT", sub: "W\u219216" },
+  WUNPACK:{ symbol: "CVT", sub: "16\u2192W" },
+  // Integer misc
+  ISCL11_32:{ symbol: "\u00d7", sub: "I11\u2192I32", cat: "int-arith" },
+  MOVRI:  { symbol: "MOV", sub: "IMM" },
+  ADDSP:  { symbol: "ADDSP" },
+  // System/control
+  BRK:    { symbol: "BRK", cat: "ctrl" },
+  JV:     { symbol: "JV", cat: "ctrl" },
+  PFCTL:  { symbol: "PF" },
+  STPRNG: { symbol: "PRNG" },
 };
 
 // Category → PE tile fill color (pre-computed to avoid per-frame branching)
@@ -245,7 +277,7 @@ function _updateEntryColors(entry) {
 // _disabledCats is empty at this point, so _updateEntryColors produces the
 // same active-path values as the original inline logic.
 for (const entry of Object.values(SYMBOLIC_OPS)) {
-  entry.isText = /^[A-Z]/.test(entry.symbol);
+  entry.isText = /^[A-Z\u2102]/.test(entry.symbol);
   _updateEntryColors(entry);
 }
 
@@ -254,7 +286,7 @@ for (const entry of Object.values(SYMBOLIC_OPS)) {
 const FONT_SIZE_MAX_LABEL = CELL_SIZE * 0.25;
 const FONT_SIZE_SCALE_LABEL = CELL_SIZE * 1.2;
 const FONT_TEXT_MAX = CELL_SIZE * 0.32;   // max font size for text symbols
-const FONT_TEXT_FIT = CELL_SIZE * 1.4;    // shrink factor: fontSize = FIT / length
+const FONT_TEXT_FIT = CELL_SIZE * 1.15;   // shrink factor: fontSize = FIT / length
 const FONT_BOLD_MATH = `bold ${CELL_SIZE * 0.55}px sans-serif`;
 const FONT_SUB = `${CELL_SIZE * 0.2}px sans-serif`;
 

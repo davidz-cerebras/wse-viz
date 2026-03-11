@@ -536,8 +536,9 @@ export class TraceParser {
       }
     }
 
-    mp("Sorting landings\u2026", 90);
+    mp("Sorting landings\u2026", 88);
     const landingIndex = TraceParser._compactLandings(allLandCycles, allLandXs, allLandYs, allLandColors, allLandDirs);
+
     mp("Done", 100);
 
     return { dimX, dimY, landingIndex, peStateIndex, opLookup, predLookup,
@@ -555,7 +556,23 @@ export class TraceParser {
     if (sorted) return;
     const order = Array.from({ length: n }, (_, i) => i);
     order.sort((a, b) => cycles[a] - cycles[b]);
-    const reorder = (arr) => { const t = arr.slice(); for (let i = 0; i < n; i++) arr[i] = t[order[i]]; };
+    // In-place cyclic permutation — O(1) extra space per array instead of O(n).
+    const visited = new Uint8Array(n);
+    const reorder = (arr) => {
+      for (let i = 0; i < n; i++) {
+        if (visited[i] || order[i] === i) continue;
+        let j = i;
+        let tmp = arr[i];
+        while (order[j] !== i) {
+          arr[j] = arr[order[j]];
+          visited[j] = 1;
+          j = order[j];
+        }
+        arr[j] = tmp;
+        visited[j] = 1;
+      }
+      visited.fill(0);
+    };
     reorder(cycles);
     for (const arr of arrays) reorder(arr);
   }
@@ -664,6 +681,36 @@ export class TraceParser {
       }
     }
     return found;
+  }
+
+  /**
+   * Find the range of potentially-live wavelets at a given cycle.
+   * Returns { lowerBound, upperBound } indices into waveletList, or null.
+   * Uses two binary searches: upper bound on firstCycle, lower bound on prefMaxLastCycle.
+   * The range may include some dead wavelets (filtered by the caller via lastCycle check).
+   */
+  static findLiveWaveletRange(waveletList, prefMaxLastCycle, cycle) {
+    if (!waveletList) return null;
+    const wvLen = waveletList.length;
+
+    // Upper bound: first index where firstCycle > cycle
+    let lo = 0, hi = wvLen;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (waveletList[mid].firstCycle <= cycle) lo = mid + 1;
+      else hi = mid;
+    }
+    const upperBound = lo;
+    if (upperBound === 0) return null;
+
+    // Lower bound: first index where prefMaxLastCycle >= cycle
+    lo = 0; hi = upperBound;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (prefMaxLastCycle[mid] < cycle) lo = mid + 1;
+      else hi = mid;
+    }
+    return { lowerBound: lo, upperBound };
   }
 
   // Look up landings for a given cycle in the compact landingIndex.

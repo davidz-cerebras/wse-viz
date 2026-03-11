@@ -196,30 +196,10 @@ function handleState(cycle) {
 
   // Wavelet reconstruction
   const wavelets = [];
-  if (td.waveletList) {
+  const wvRange = TraceParser.findLiveWaveletRange(td.waveletList, td.wavPrefMaxLastCycle, cycle);
+  if (wvRange) {
     const wvList = td.waveletList;
-    const wvLen = wvList.length;
-    const prefMax = td.wavPrefMaxLastCycle;
-
-    // Upper bound: first index where firstCycle > cycle
-    let lo = 0, hi = wvLen;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (wvList[mid].firstCycle <= cycle) lo = mid + 1;
-      else hi = mid;
-    }
-    const upperBound = lo;
-
-    // Lower bound: first index where prefMaxLastCycle >= cycle
-    lo = 0; hi = upperBound;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (prefMax[mid] < cycle) lo = mid + 1;
-      else hi = mid;
-    }
-    const lowerBound = lo;
-
-    for (let wi = lowerBound; wi < upperBound; wi++) {
+    for (let wi = wvRange.lowerBound; wi < wvRange.upperBound; wi++) {
       const wv = wvList[wi];
       if (wv.lastCycle < cycle) continue;
       const branches = getBranches(wv);
