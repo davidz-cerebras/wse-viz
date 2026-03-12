@@ -9,13 +9,18 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { hostname, cpus } from "node:os";
+import { hostname, cpus, networkInterfaces } from "node:os";
 import { Worker } from "node:worker_threads";
 import { NodeFile } from "./node-file.js";
 import { TraceParser } from "./trace-parser.js";
 import { extractBranches } from "./wavelet.js";
 
 const PARALLEL_THRESHOLD = 64 * 1024 * 1024; // 64MB
+
+// Clear the current terminal line and write a message.
+function statusLine(msg, newline = false) {
+  process.stderr.write(`\r\x1b[K  ${msg}${newline ? "\n" : ""}`);
+}
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -50,9 +55,9 @@ let raw;
 if (nodeFile.size < PARALLEL_THRESHOLD) {
   process.stderr.write(`Indexing ${traceFile} (single-threaded)...\n`);
   raw = await TraceParser.index(nodeFile, (pct) => {
-    process.stderr.write(`\r  ${pct.toFixed(1)}%`);
+    statusLine(`${pct.toFixed(1)}%`);
   });
-  process.stderr.write("\r  done.     \n");
+  statusLine("done.", true);
 } else {
   const numWorkers = cpus().length;
   process.stderr.write(`Indexing ${traceFile} (${numWorkers} threads)...\n`);
@@ -79,7 +84,7 @@ if (nodeFile.size < PARALLEL_THRESHOLD) {
         if (msg.type === "progress") {
           segProgress[msg.segmentIndex] = msg.pct;
           const overall = segProgress.reduce((a, b) => a + b, 0) / numWorkers;
-          process.stderr.write(`\r  ${overall.toFixed(1)}%`);
+          statusLine(`${overall.toFixed(1)}%`);
         } else if (msg.type === "done") {
           results[msg.segmentIndex] = msg.result;
           completed++;
@@ -89,11 +94,11 @@ if (nodeFile.size < PARALLEL_THRESHOLD) {
     }
   });
 
-  process.stderr.write("\r  merging...     \n");
+  statusLine("merging...", true);
   raw = TraceParser.mergeSegments(segments, (step, pct) => {
-    process.stderr.write(`\r  ${step} ${pct.toFixed(1)}%`);
+    statusLine(`${step} ${pct.toFixed(1)}%`);
   });
-  process.stderr.write("\r  done.              \n");
+  statusLine("done.", true);
 }
 
 nodeFile.close();
@@ -325,7 +330,17 @@ function tryListen(attempt) {
     }
   });
   server.listen(tryPort, () => {
-    process.stderr.write(`Server ready — open http://${hostname()}:${tryPort}\n`);
+    let host = hostname();
+    // AWS-style hostnames (ip-w-x-y-z) aren't resolvable externally; use the IP instead
+    if (/^ip-\d+-\d+-\d+-\d+/.test(host)) {
+      for (const ifaces of Object.values(networkInterfaces())) {
+        for (const iface of ifaces) {
+          if (iface.family === "IPv4" && !iface.internal) { host = iface.address; break; }
+        }
+        if (host !== hostname()) break;
+      }
+    }
+    process.stderr.write(`Server ready — open http://${host}:${tryPort}\n`);
   });
 }
 
