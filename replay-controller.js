@@ -414,12 +414,12 @@ async function selectPEFromServer(row, col, traceX, traceY) {
 
   let resp;
   try { resp = await fetch(`/api/pe-trace?x=${traceX}&y=${traceY}`); }
-  catch { deselectPE(); return; }
-  if (myGen !== peSelectGeneration) return; // stale response — user clicked another PE
+  catch { if (myGen === peSelectGeneration) deselectPE(); return; }
+  if (myGen !== peSelectGeneration) return;
 
   let data;
   try { data = await resp.json(); }
-  catch { deselectPE(); return; }
+  catch { if (myGen === peSelectGeneration) deselectPE(); return; }
   if (myGen !== peSelectGeneration) return;
 
   const entry = data.found ? data.entry : null;
@@ -1010,7 +1010,6 @@ export function handleTraceFile(event, setGrid) {
   els.loadingFill.style.width = "0%";
   els.loadingPct.textContent = "0.0%";
 
-  if (activeWorker) activeWorker.terminate();
   const worker = new Worker("trace-worker.js", { type: "module" });
   activeWorker = worker;
 
