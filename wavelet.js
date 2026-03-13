@@ -8,6 +8,12 @@ const DIR_DELTA = { E: [1, 0], W: [-1, 0], N: [0, -1], S: [0, 1] };
 // Direction → opposite (for computing arrival direction at destination)
 const DIR_OPPOSITE = { E: "W", W: "E", N: "S", S: "N" };
 
+/** Lazily extract and cache branches for a wavelet. */
+export function getBranches(wv) {
+  if (!wv._branches) wv._branches = extractBranches(wv);
+  return wv._branches;
+}
+
 /**
  * Extracts linear branches from a TracedWavelet's hop list.
  * Each branch waypoint includes arrival/departure info for ramp positioning.

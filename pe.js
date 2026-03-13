@@ -5,6 +5,7 @@ import {
   PE_TEXT_DEFAULT, PE_TEXT_DEFAULT_SUB, PE_TEXT_CTRL, PE_TEXT_CTRL_SUB, PE_TEXT_TASK, PE_TEXT_TASK_SUB,
   DEMO_PE_ON_DURATION, DEMO_PE_BRIGHTEN_DURATION, DEMO_PE_DIM_DURATION,
 } from "./constants.js";
+import { TraceParser } from "./trace-parser.js";
 
 // Operation categories for PE color-coding:
 //   "fp-arith"  = floating-point compute (green)
@@ -228,10 +229,10 @@ const SYMBOLIC_OPS = {
   SELECT32:{ symbol: "SEL", sub: "I32" },
   DEP16:  { symbol: "DEP", sub: "I16" },
   EXTR16: { symbol: "EXTR", sub: "I16" },
-  MERGE:  { symbol: "MERGE", sub: "I16\u2192I32" },
-  MERGEF: { symbol: "MERGE", sub: "I16\u2192I32" },
-  MERGE64:{ symbol: "MERGE", sub: "I32\u2192I64" },
-  MERGEF64:{ symbol: "MERGE", sub: "I32\u2192I64" },
+  MERGE:  { symbol: "MERGE", sub: "16\u219232" },
+  MERGEF: { symbol: "MERGE", sub: "16\u219232" },
+  MERGE64:{ symbol: "MERGE", sub: "32\u219264" },
+  MERGEF64:{ symbol: "MERGE", sub: "32\u219264" },
   WPACK:  { symbol: "CVT", sub: "W\u219216" },
   WUNPACK:{ symbol: "CVT", sub: "16\u2192W" },
   // Integer misc
@@ -360,18 +361,14 @@ function _getOpBitmap(entry) {
 // hash-lookup SYMBOLIC_OPS.
 export function buildOpEntryLookup(opLookup) {
   const entries = new Array(opLookup.length);
-  const nops = new Uint8Array(opLookup.length);
+  const nops = TraceParser.buildNopLookup(opLookup);
   for (let i = 0; i < opLookup.length; i++) {
+    if (nops[i]) { entries[i] = null; continue; }
     const op = opLookup[i];
     if (op) {
-      if (op === "NOP" || op.startsWith("NOP.")) {
-        entries[i] = null;
-        nops[i] = 1;
-      } else {
-        const dotIdx = op.indexOf(".");
-        const baseOp = dotIdx >= 0 ? op.substring(0, dotIdx) : op;
-        entries[i] = SYMBOLIC_OPS[baseOp] || null;
-      }
+      const dotIdx = op.indexOf(".");
+      const baseOp = dotIdx >= 0 ? op.substring(0, dotIdx) : op;
+      entries[i] = SYMBOLIC_OPS[baseOp] || null;
     } else {
       entries[i] = null;
     }

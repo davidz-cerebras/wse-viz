@@ -508,9 +508,12 @@ canvas {
   color: #81c784;
 }
 
+#codeLog {
+  font-size: 0.65rem;
+}
+
 .code-operands {
   color: var(--color-text-secondary);
-  font-size: 0.65rem;
   flex: 1;
 }
 

@@ -13,7 +13,7 @@ import { hostname, cpus, networkInterfaces } from "node:os";
 import { Worker } from "node:worker_threads";
 import { NodeFile } from "./node-file.js";
 import { TraceParser } from "./trace-parser.js";
-import { extractBranches } from "./wavelet.js";
+import { getBranches } from "./wavelet.js";
 
 const PARALLEL_THRESHOLD = 64 * 1024 * 1024; // 64MB
 
@@ -115,26 +115,11 @@ for (const [key, entry] of peStateIndex) {
 let waveletList = null;
 let wavPrefMaxLastCycle = null;
 if (raw.hasWaveletData) {
-  waveletList = [...raw.waveletIndex.values()];
-  for (const wv of waveletList) {
-    wv.firstCycle = wv.hops.cycles[0];
-    wv.lastCycle = wv.hops.cycles[wv.hops.cycles.length - 1];
-  }
-  waveletList.sort((a, b) => a.firstCycle - b.firstCycle);
-  wavPrefMaxLastCycle = new Float64Array(waveletList.length);
-  let runMax = -Infinity;
-  for (let i = 0; i < waveletList.length; i++) {
-    runMax = Math.max(runMax, waveletList[i].lastCycle);
-    wavPrefMaxLastCycle[i] = runMax;
-  }
+  ({ waveletList, wavPrefMaxLastCycle } =
+    TraceParser.prepareWaveletList([...raw.waveletIndex.values()]));
 }
 
-// Build NOP lookup from opLookup (avoids importing pe.js which has browser deps)
-const opNopLookup = new Uint8Array(raw.opLookup.length);
-for (let i = 0; i < raw.opLookup.length; i++) {
-  const op = raw.opLookup[i];
-  if (op && (op === "NOP" || op.startsWith("NOP."))) opNopLookup[i] = 1;
-}
+const opNopLookup = TraceParser.buildNopLookup(raw.opLookup);
 
 const traceData = {
   dimX: raw.dimX,
@@ -159,15 +144,6 @@ if (traceData.dimX === 0 || traceData.dimY === 0 || traceData.minCycle > traceDa
 
 process.stderr.write(`Grid: ${traceData.dimY} rows × ${traceData.dimX} cols, ` +
   `cycles ${traceData.minCycle}–${traceData.maxCycle}\n`);
-
-// ---------------------------------------------------------------------------
-// Wavelet branch cache
-// ---------------------------------------------------------------------------
-
-function getBranches(wv) {
-  if (!wv._branches) wv._branches = extractBranches(wv);
-  return wv._branches;
-}
 
 // ---------------------------------------------------------------------------
 // API: /api/meta

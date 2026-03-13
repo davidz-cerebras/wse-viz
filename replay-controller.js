@@ -1,5 +1,5 @@
 import { TraceParser, LANDING_DECODE } from "./trace-parser.js";
-import { extractBranches, TracedPacket } from "./wavelet.js";
+import { getBranches, TracedPacket } from "./wavelet.js";
 import { buildOpEntryLookup } from "./pe.js";
 import { PE_TRACE_WINDOW, STEP_ANIMATION_MS, SERVER_MAX_PREFETCH_INFLIGHT } from "./constants.js";
 
@@ -119,10 +119,6 @@ export function getIsScrubbing() {
   return isScrubbing;
 }
 
-function getBranches(wv) {
-  if (!wv._branches) wv._branches = extractBranches(wv);
-  return wv._branches;
-}
 
 function syncTracedPackets(cycle, fraction) {
   const fc = cycle + (fraction ?? 0);
@@ -247,6 +243,18 @@ export function selectPE(row, col, traceX, traceY) {
   renderOpChart();
   renderPETraceWindow(state.currentCycle);
   setupPETraceScroll();
+  applyTraceTab();
+}
+
+/** Apply the current tab state (visual toggle + data loading if needed). */
+function applyTraceTab() {
+  els.tabPipeline.classList.toggle("active", activeTraceTab === "pipeline");
+  els.tabCode.classList.toggle("active", activeTraceTab === "code");
+  els.pipelineView.classList.toggle("hidden", activeTraceTab !== "pipeline");
+  els.codeView.classList.toggle("hidden", activeTraceTab !== "code");
+  if (activeTraceTab === "code" && selectedPE && !codeViewData) {
+    loadCodeView(selectedPE.traceX, selectedPE.traceY);
+  }
 }
 
 function renderOpChart() {
@@ -396,13 +404,7 @@ function renderPETraceWindow(centerCycle) {
 function switchTraceTab(tab) {
   if (tab === activeTraceTab) return;
   activeTraceTab = tab;
-  els.tabPipeline.classList.toggle("active", tab === "pipeline");
-  els.tabCode.classList.toggle("active", tab === "code");
-  els.pipelineView.classList.toggle("hidden", tab !== "pipeline");
-  els.codeView.classList.toggle("hidden", tab !== "code");
-  if (tab === "code" && selectedPE && !codeViewData) {
-    loadCodeView(selectedPE.traceX, selectedPE.traceY);
-  }
+  applyTraceTab();
   if (tab === "pipeline" && selectedPE) {
     updatePETraceHighlight();
   }
@@ -594,6 +596,7 @@ async function selectPEFromServer(row, col, traceX, traceY) {
   renderOpChart();
   renderPETraceWindow(state.currentCycle);
   setupPETraceScroll();
+  applyTraceTab();
 }
 
 export function deselectPE() {
@@ -617,16 +620,10 @@ export function deselectPE() {
   els.traceLog.style.flex = "";
   els.opChart.style.flex = "";
   els.opChart.style.maxHeight = "";
-  // Reset code view
+  // Reset code view data (but preserve activeTraceTab across PE switches)
   codeViewData = null;
   _lastCodeScrolled = null;
   els.codeLog.innerHTML = "";
-  // Reset to pipeline tab
-  activeTraceTab = "pipeline";
-  els.tabPipeline.classList.add("active");
-  els.tabCode.classList.remove("active");
-  els.pipelineView.classList.remove("hidden");
-  els.codeView.classList.add("hidden");
 }
 
 let _highlightedEntry = null; // cached reference to avoid querySelector per frame
@@ -748,7 +745,7 @@ export function updateReplayTick(timestamp) {
   state.currentCycle = endCycle;
 
   if (endCycle !== lastReconstructedCycle && traceData) {
-    const range = TraceParser.getLandingRange(traceData.landingIndex, endCycle);
+    const range = serverMode ? null : TraceParser.getLandingRange(traceData.landingIndex, endCycle);
     reconstructStateAtCycle(endCycle, range);
     lastReconstructedCycle = endCycle;
   }
@@ -1249,21 +1246,8 @@ export function handleTraceFile(event, setGrid) {
       let waveletList = null;
       let wavPrefMaxLastCycle = null;
       if (d.hasWaveletData) {
-        waveletList = d.waveletEntries.map(e => e[1]);
-        for (const wv of waveletList) {
-          wv.firstCycle = wv.hops.cycles[0];
-          wv.lastCycle = wv.hops.cycles[wv.hops.cycles.length - 1];
-        }
-        waveletList.sort((a, b) => a.firstCycle - b.firstCycle);
-        // Prefix max of lastCycle: prefMax[i] = max(lastCycle[0..i]).
-        // Non-decreasing, enabling binary search for the lower bound of
-        // live wavelets at any cycle (everything before lowerBound is dead).
-        wavPrefMaxLastCycle = new Float64Array(waveletList.length);
-        let runMax = -Infinity;
-        for (let i = 0; i < waveletList.length; i++) {
-          runMax = Math.max(runMax, waveletList[i].lastCycle);
-          wavPrefMaxLastCycle[i] = runMax;
-        }
+        const wvRaw = d.waveletEntries.map(e => e[1]);
+        ({ waveletList, wavPrefMaxLastCycle } = TraceParser.prepareWaveletList(wvRaw));
       }
 
       const { entries: opEntryLookup, nops: opNopLookup } = buildOpEntryLookup(d.opLookup);

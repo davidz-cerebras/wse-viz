@@ -862,6 +862,35 @@ export class TraceParser {
    * Uses two binary searches: upper bound on firstCycle, lower bound on prefMaxLastCycle.
    * The range may include some dead wavelets (filtered by the caller via lastCycle check).
    */
+  /**
+   * Sort a wavelet list by firstCycle and compute the prefix-max of lastCycle
+   * for binary-search-based live-range queries. Returns { waveletList, wavPrefMaxLastCycle }.
+   */
+  /** Build a Uint8Array marking which opcode IDs are NOPs. */
+  static buildNopLookup(opLookup) {
+    const nops = new Uint8Array(opLookup.length);
+    for (let i = 0; i < opLookup.length; i++) {
+      const op = opLookup[i];
+      if (op && (op === "NOP" || op.startsWith("NOP."))) nops[i] = 1;
+    }
+    return nops;
+  }
+
+  static prepareWaveletList(wavelets) {
+    for (const wv of wavelets) {
+      wv.firstCycle = wv.hops.cycles[0];
+      wv.lastCycle = wv.hops.cycles[wv.hops.cycles.length - 1];
+    }
+    wavelets.sort((a, b) => a.firstCycle - b.firstCycle);
+    const prefMax = new Float64Array(wavelets.length);
+    let runMax = -Infinity;
+    for (let i = 0; i < wavelets.length; i++) {
+      runMax = Math.max(runMax, wavelets[i].lastCycle);
+      prefMax[i] = runMax;
+    }
+    return { waveletList: wavelets, wavPrefMaxLastCycle: prefMax };
+  }
+
   static findLiveWaveletRange(waveletList, prefMaxLastCycle, cycle) {
     if (!waveletList) return null;
     const wvLen = waveletList.length;
