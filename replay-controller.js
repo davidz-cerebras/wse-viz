@@ -20,6 +20,9 @@ let peTraceWindowSize = 0;  // number of entries currently in the DOM
 let peTraceScrollLock = false; // prevents scroll-handler re-entrancy
 let lastReconstructedCycle = -1; // tracks when to call reconstructStateAtCycle
 let maxCycleStr = ""; // cached String(maxCycle) for updateScrubUI
+let activeTraceTab = "pipeline"; // "pipeline" or "code"
+let codeViewData = null; // cached /api/pe-memory response or local pcIndex data
+let _lastCodeScrolled = null; // dedup scrollIntoView for code tab
 
 
 // Server mode state
@@ -50,10 +53,11 @@ function _buildFlatPEState(entry, td, minCycle, maxCycle) {
   const opArr = new Array(totalCycles).fill(null);
   const predArr = new Array(totalCycles).fill(null);
   const stallReasonArr = new Array(totalCycles).fill(null);
+  const pcArr = new Uint16Array(totalCycles).fill(0xFFFF); // 0xFFFF = idle/stall sentinel
 
   if (entry) {
     let evtIdx = 0;
-    let curBusy = 0, curOp = null, curPred = null;
+    let curBusy = 0, curOp = null, curPred = null, curPC = 0xFFFF;
     let curStallReason = null, curStallCycle = -1;
     for (let i = 0; i < totalCycles; i++) {
       const cycle = minCycle + i;
@@ -67,14 +71,15 @@ function _buildFlatPEState(entry, td, minCycle, maxCycle) {
           else { curBusy = entry.busy[evtIdx]; }
           curOp = td.opLookup[opId] ?? "";
           curPred = td.predLookup[entry.predIds[evtIdx]] ?? "";
+          curPC = entry.pcs ? entry.pcs[evtIdx] : 0xFFFF;
           if (entry.cycles[evtIdx] > curStallCycle) curStallReason = null;
         }
         evtIdx++;
       }
       if (curBusy) {
-        busyArr[i] = 1; opArr[i] = curOp; predArr[i] = curPred;
+        busyArr[i] = 1; opArr[i] = curOp; predArr[i] = curPred; pcArr[i] = curPC;
       } else if (curOp) {
-        opArr[i] = curOp; predArr[i] = curPred;
+        opArr[i] = curOp; predArr[i] = curPred; pcArr[i] = curPC;
       }
       stallReasonArr[i] = curStallReason;
     }
@@ -88,7 +93,7 @@ function _buildFlatPEState(entry, td, minCycle, maxCycle) {
     }
   }
 
-  return { busyArr, opArr, predArr, stallReasonArr, opCounts, totalCycles };
+  return { busyArr, opArr, predArr, stallReasonArr, pcArr, opCounts, totalCycles };
 }
 
 export function initReplay(deps) {
@@ -97,6 +102,9 @@ export function initReplay(deps) {
   animationLoop = deps.animationLoop;
   showPanel = deps.showPanel;
   resizeCanvas = deps.resizeCanvas;
+  // Tab switching
+  els.tabPipeline.addEventListener("click", () => switchTraceTab("pipeline"));
+  els.tabCode.addEventListener("click", () => switchTraceTab("code"));
 }
 
 export function setReplayGrid(g) {
@@ -381,6 +389,162 @@ function renderPETraceWindow(centerCycle) {
   updatePETraceHighlight();
 }
 
+// ---------------------------------------------------------------------------
+// Trace panel tabs: Pipeline / Code
+// ---------------------------------------------------------------------------
+
+function switchTraceTab(tab) {
+  if (tab === activeTraceTab) return;
+  activeTraceTab = tab;
+  els.tabPipeline.classList.toggle("active", tab === "pipeline");
+  els.tabCode.classList.toggle("active", tab === "code");
+  els.pipelineView.classList.toggle("hidden", tab !== "pipeline");
+  els.codeView.classList.toggle("hidden", tab !== "code");
+  if (tab === "code" && selectedPE && !codeViewData) {
+    loadCodeView(selectedPE.traceX, selectedPE.traceY);
+  }
+  if (tab === "pipeline" && selectedPE) {
+    updatePETraceHighlight();
+  }
+}
+
+function loadCodeView(traceX, traceY) {
+  if (serverMode) {
+    const gen = peSelectGeneration;
+    els.codeLog.innerHTML = "<div style='color: var(--color-text-muted); padding: 0.5rem;'>Loading...</div>";
+    fetch(`/api/pe-memory?x=${traceX}&y=${traceY}`)
+      .then(r => r.json())
+      .then(data => {
+        if (gen !== peSelectGeneration) return; // stale — user clicked another PE
+        if (!data.found) { codeViewData = []; }
+        else { codeViewData = data.instructions; }
+        renderCodeView();
+      })
+      .catch(err => {
+        if (gen !== peSelectGeneration) return;
+        console.error("[wse-viz] Code view load failed:", err);
+        els.codeLog.innerHTML = "<div style='color: #ef5350; padding: 0.5rem;'>Failed to load</div>";
+      });
+  } else {
+    // Local mode: read from traceData.pcIndex
+    const key = `${traceX},${traceY}`;
+    const m = traceData && traceData.pcIndex ? traceData.pcIndex.get(key) : null;
+    if (!m) { codeViewData = []; }
+    else {
+      codeViewData = [...m.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([pc, rec]) => [pc, rec.op, rec.pred, rec.count, rec.firstCycle, rec.lastCycle, rec.operands || null]);
+    }
+    renderCodeView();
+  }
+}
+
+function renderCodeView() {
+  const log = els.codeLog;
+  log.innerHTML = "";
+  if (!codeViewData || codeViewData.length === 0) {
+    log.innerHTML = "<div style='color: var(--color-text-muted); padding: 0.5rem;'>No instructions recorded</div>";
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  let prevPC = -1;
+  for (const [pc, op, pred, count, firstCycle, lastCycle, operands] of codeViewData) {
+    // Skip placeholder records from IS OP that were never executed
+    if (!op || count === 0) continue;
+    // Insert a section break if there's a gap in the instruction stream
+    // (instructions are 32-bit = 2 × 16-bit words, so consecutive PCs differ by 2)
+    if (prevPC >= 0 && pc !== prevPC + 2) {
+      const hr = document.createElement("div");
+      hr.className = "code-break";
+      frag.appendChild(hr);
+    }
+    prevPC = pc;
+
+    const div = document.createElement("div");
+    div.className = "code-entry";
+    div.dataset.pc = pc;
+
+    const addrSpan = document.createElement("span");
+    addrSpan.className = "code-addr";
+    addrSpan.textContent = `0x${pc.toString(16).toUpperCase().padStart(4, "0")}`;
+
+    const instrSpan = document.createElement("span");
+    instrSpan.className = "code-instr";
+    if (pred) {
+      const predSpan = document.createElement("span");
+      predSpan.className = "code-pred";
+      predSpan.textContent = pred + " ";
+      instrSpan.appendChild(predSpan);
+    }
+    const opText = document.createElement("span");
+    opText.className = "code-op";
+    opText.textContent = op;
+    instrSpan.appendChild(opText);
+
+    div.appendChild(addrSpan);
+    div.appendChild(instrSpan);
+    if (operands) {
+      const opsSpan = document.createElement("span");
+      opsSpan.className = "code-operands";
+      opsSpan.textContent = operands;
+      div.appendChild(opsSpan);
+    }
+    const countSpan = document.createElement("span");
+    countSpan.className = "code-count";
+    countSpan.textContent = `×${count}`;
+    div.appendChild(countSpan);
+
+    // Click to seek to nearest execution of this instruction from current cycle
+    div.addEventListener("click", () => {
+      if (!state || !selectedPE || !selectedPE.pcArr) return;
+      const targetPC = pc;
+      const cur = state.currentCycle - selectedPE.minCycle;
+      const len = selectedPE.totalCycles;
+      const arr = selectedPE.pcArr;
+      // Scan outward from current position: forward first, then backward
+      for (let d = 0; d < len; d++) {
+        const fwd = cur + d;
+        if (fwd < len && arr[fwd] === targetPC) {
+          seekToCycle(selectedPE.minCycle + fwd);
+          return;
+        }
+        const bwd = cur - d;
+        if (d > 0 && bwd >= 0 && arr[bwd] === targetPC) {
+          seekToCycle(selectedPE.minCycle + bwd);
+          return;
+        }
+      }
+    });
+
+    frag.appendChild(div);
+  }
+  log.appendChild(frag);
+  updateCodeViewHighlight();
+}
+
+function updateCodeViewHighlight() {
+  if (activeTraceTab !== "code" || !state || !codeViewData || !selectedPE) return;
+  // Find the PC currently executing at this cycle
+  const idx = state.currentCycle - selectedPE.minCycle;
+  const currentPC = (idx >= 0 && idx < selectedPE.totalCycles && selectedPE.pcArr)
+    ? selectedPE.pcArr[idx] : 0xFFFF;
+  let activeEl = null;
+  for (const el of els.codeLog.children) {
+    if (!el.dataset.pc) continue; // skip break divs
+    const pc = parseInt(el.dataset.pc, 10);
+    const active = currentPC !== 0xFFFF && pc === currentPC;
+    el.classList.toggle("current", active);
+    if (active && !activeEl) activeEl = el;
+  }
+  if (activeEl && activeEl !== _lastCodeScrolled) {
+    _lastCodeScrolled = activeEl;
+    activeEl.scrollIntoView({ block: "nearest" });
+  } else if (!activeEl) {
+    _lastCodeScrolled = null;
+  }
+}
+
 function setupPETraceScroll() {
   // Re-render window when user scrolls to edges
   els.traceLog.onscroll = () => {
@@ -453,6 +617,16 @@ export function deselectPE() {
   els.traceLog.style.flex = "";
   els.opChart.style.flex = "";
   els.opChart.style.maxHeight = "";
+  // Reset code view
+  codeViewData = null;
+  _lastCodeScrolled = null;
+  els.codeLog.innerHTML = "";
+  // Reset to pipeline tab
+  activeTraceTab = "pipeline";
+  els.tabPipeline.classList.add("active");
+  els.tabCode.classList.remove("active");
+  els.pipelineView.classList.remove("hidden");
+  els.codeView.classList.add("hidden");
 }
 
 let _highlightedEntry = null; // cached reference to avoid querySelector per frame
@@ -460,6 +634,7 @@ let _lastScrolledEntry = null; // avoid calling scrollIntoView every frame for t
 
 function updatePETraceHighlight() {
   if (!selectedPE || !state) return;
+  if (activeTraceTab === "code") { updateCodeViewHighlight(); return; }
 
   const idx = state.currentCycle - selectedPE.minCycle;
   const localIdx = idx - peTraceWindowStart;
@@ -669,14 +844,14 @@ function doStep(direction) {
   if (!state || !traceData) return;
   const now = performance.now();
   if (now - lastStepTime < STEP_ANIMATION_MS) return;
-  lastStepTime = now;
-
-  state.playing = false;
-  state.direction = direction;
-  updateTransportUI();
 
   const targetCycle = state.currentCycle + direction;
   if (targetCycle < state.minCycle || targetCycle > state.maxCycle) return;
+
+  lastStepTime = now;
+  state.playing = false;
+  state.direction = direction;
+  updateTransportUI();
 
   const ready = seekToCycle(targetCycle);
 
@@ -985,7 +1160,8 @@ function serverPrefetch() {
         if (gen !== serverGeneration) return; // stale session
         prefetchInFlight--;
         serverStateCache.delete(cycle); // clear the null placeholder
-        serverPrefetch(); // keep trying remaining cycles
+        // Don't retry immediately — avoids infinite retry storm on persistent
+        // failure. Prefetching resumes on the next cache hit or playback tick.
       });
   }
 }
@@ -1092,6 +1268,9 @@ export function handleTraceFile(event, setGrid) {
 
       const { entries: opEntryLookup, nops: opNopLookup } = buildOpEntryLookup(d.opLookup);
 
+      // Rebuild pcIndex from serialized pcEntries
+      const pcIndex = TraceParser._rebuildPCMaps(d.pcEntries || []);
+
       const td = {
         dimX: d.dimX,
         dimY: d.dimY,
@@ -1107,6 +1286,7 @@ export function handleTraceFile(event, setGrid) {
         hasWaveletData: d.hasWaveletData,
         minCycle: d.minCycle,
         maxCycle: d.maxCycle,
+        pcIndex,
       };
 
       els.loadingBar.classList.add("hidden");

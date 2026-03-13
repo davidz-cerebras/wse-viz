@@ -70,6 +70,11 @@ function init() {
     loadingLabel: document.querySelector("#loadingBar .loading-label"),
     playbackControls: document.getElementById("playbackControls"),
     serverStatus: document.getElementById("serverStatus"),
+    tabPipeline: document.getElementById("tabPipeline"),
+    tabCode: document.getElementById("tabCode"),
+    pipelineView: document.getElementById("pipelineView"),
+    codeView: document.getElementById("codeView"),
+    codeLog: document.getElementById("codeLog"),
   };
 
   setGrid(GRID_ROWS, GRID_COLS);

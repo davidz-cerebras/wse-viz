@@ -118,7 +118,7 @@ function postResult(traceData) {
   }
   for (const [, entry] of traceData.peStateIndex) {
     transfer.push(entry.cycles.buffer, entry.busy.buffer,
-      entry.opIds.buffer, entry.predIds.buffer, entry.stall.buffer);
+      entry.opIds.buffer, entry.predIds.buffer, entry.pcs.buffer, entry.stall.buffer);
   }
   for (const [, entry] of traceData.waveletIndex) {
     const h = entry.hops;
@@ -128,6 +128,18 @@ function postResult(traceData) {
 
   const peStateEntries = [...traceData.peStateIndex.entries()];
   const waveletEntries = [...traceData.waveletIndex.entries()];
+
+  // Serialize pcIndex: Map<key, Map<pc, rec>> → array of [key, [[pc, op, pred, count, first, last, operands], ...]]
+  const pcEntries = [];
+  if (traceData.pcIndex) {
+    for (const [key, m] of traceData.pcIndex) {
+      const instrs = [];
+      for (const [pc, rec] of m) {
+        instrs.push([pc, rec.op, rec.pred, rec.count, rec.firstCycle, rec.lastCycle, rec.operands || null]);
+      }
+      pcEntries.push([key, instrs]);
+    }
+  }
 
   self.postMessage({
     type: "done",
@@ -142,6 +154,7 @@ function postResult(traceData) {
       hasWaveletData: traceData.hasWaveletData,
       minCycle: traceData.minCycle,
       maxCycle: traceData.maxCycle,
+      pcEntries,
     },
   }, transfer);
 }

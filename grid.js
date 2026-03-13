@@ -3,7 +3,7 @@ import { DataPacket } from "./packet.js";
 import {
   CELL_SIZE, GAP_SIZE, ARROW_DEPTH, RAMP_LATERAL, ARROW_SIZE,
   ZOOM_PREVIEW_COLOR, CORNER_LABEL_COLOR,
-  PE_COLOR_STALL_WAVELET, PE_COLOR_STALL_PIPE,
+  PE_COLOR_NOP, PE_COLOR_STALL_WAVELET, PE_COLOR_STALL_PIPE,
   RAMP_ON_ACTIVE, RAMP_ON_INACTIVE, RAMP_OFF_ACTIVE, RAMP_OFF_INACTIVE,
 } from "./constants.js";
 
@@ -147,7 +147,7 @@ export class Grid {
       pe.stall = stall || null;
       pe.stallReason = reason || null;
       // Stall color only shown when nothing is executing (op takes visual priority)
-      if (stall && !pe.op) pe.fillColor = stall === "wavelet" ? PE_COLOR_STALL_WAVELET : PE_COLOR_STALL_PIPE;
+      if (stall && !pe.op) pe.fillColor = stall === "nop" ? PE_COLOR_NOP : stall === "wavelet" ? PE_COLOR_STALL_WAVELET : PE_COLOR_STALL_PIPE;
     }
   }
 
@@ -156,7 +156,7 @@ export class Grid {
       if (pe.opEntry) {
         pe.fillColor = pe.opEntry.fillColor;
       } else if (pe.stall && !pe.op) {
-        pe.fillColor = pe.stall === "wavelet" ? PE_COLOR_STALL_WAVELET : PE_COLOR_STALL_PIPE;
+        pe.fillColor = pe.stall === "nop" ? PE_COLOR_NOP : pe.stall === "wavelet" ? PE_COLOR_STALL_WAVELET : PE_COLOR_STALL_PIPE;
       }
     }
   }

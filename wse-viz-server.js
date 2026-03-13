@@ -149,6 +149,7 @@ const traceData = {
   hasWaveletData: raw.hasWaveletData,
   minCycle: raw.minCycle,
   maxCycle: raw.maxCycle,
+  pcIndex: raw.pcIndex,
 };
 
 if (traceData.dimX === 0 || traceData.dimY === 0 || traceData.minCycle > traceData.maxCycle) {
@@ -244,10 +245,28 @@ function handlePETrace(x, y) {
       busy: Array.from(entry.busy),
       opIds: Array.from(entry.opIds),
       predIds: Array.from(entry.predIds),
+      pcs: Array.from(entry.pcs),
       stall: Array.from(entry.stall),
       stallReasons: entry.stallReasons,
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// API: /api/pe-memory?x=X&y=Y
+// ---------------------------------------------------------------------------
+
+function handlePEMemory(x, y) {
+  const key = `${x},${y}`;
+  const m = traceData.pcIndex ? traceData.pcIndex.get(key) : null;
+  if (!m) return JSON.stringify({ found: false });
+
+  // Sort by PC address and serialize
+  const instructions = [...m.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([pc, rec]) => [pc, rec.op, rec.pred, rec.count, rec.firstCycle, rec.lastCycle, rec.operands || null]);
+
+  return JSON.stringify({ found: true, instructions });
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +329,15 @@ const server = createServer((req, res) => {
     if (!Number.isFinite(x) || !Number.isFinite(y)) { res.writeHead(400); res.end("Bad coords"); return; }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(handlePETrace(x, y));
+    return;
+  }
+
+  if (path === "/api/pe-memory") {
+    const x = parseInt(url.searchParams.get("x"), 10);
+    const y = parseInt(url.searchParams.get("y"), 10);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) { res.writeHead(400); res.end("Bad coords"); return; }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(handlePEMemory(x, y));
     return;
   }
 

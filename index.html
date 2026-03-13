@@ -32,7 +32,7 @@
           <span class="controls-separator demo-ctrl" hidden>|</span>
           <label class="btn file-input-label demo-ctrl" for="traceFileInput" hidden>
             Load Trace
-            <input type="file" id="traceFileInput" accept=".log,.txt,.zst" hidden />
+            <input type="file" id="traceFileInput" accept=".log,.txt" hidden />
           </label>
           <button id="undoZoomBtn" class="btn reset-zoom-btn hidden">Undo Zoom</button>
           <button id="resetZoomBtn" class="btn reset-zoom-btn hidden">Reset Zoom</button>
@@ -107,9 +107,18 @@
         </div>
         <div class="trace-panel hidden" id="tracePanel">
           <h2>Trace Events</h2>
-          <div id="traceLog" class="trace-log"></div>
-          <div id="panelResizer" class="panel-resizer hidden"></div>
-          <div id="opChart" class="op-chart hidden"></div>
+          <div class="trace-tabs">
+            <button class="trace-tab active" id="tabPipeline">Pipeline</button>
+            <button class="trace-tab" id="tabCode">CASM</button>
+          </div>
+          <div id="pipelineView">
+            <div id="traceLog" class="trace-log"></div>
+            <div id="panelResizer" class="panel-resizer hidden"></div>
+            <div id="opChart" class="op-chart hidden"></div>
+          </div>
+          <div id="codeView" class="hidden">
+            <div id="codeLog" class="trace-log"></div>
+          </div>
         </div>
       </main>
       <div class="playback-bar hidden" id="playbackBar">

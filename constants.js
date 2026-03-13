@@ -27,6 +27,7 @@ export const PE_COLOR_CTRL = "rgb(240, 240, 170)";             // cool light yel
 export const PE_COLOR_TASK = "rgb(180, 180, 190)";             // light grey
 export const PE_COLOR_MEM_READ = "rgb(230, 140, 190)";          // pink-lavender
 export const PE_COLOR_MEM_WRITE = "rgb(245, 170, 115)";         // reddish-orange
+export const PE_COLOR_NOP = "rgba(55, 68, 100, 0.4)";           // slightly lighter than idle
 export const PE_COLOR_STALL_WAVELET = "rgba(74, 25, 98, 0.5)"; // purple tint
 export const PE_COLOR_STALL_PIPE = "rgba(95, 38, 25, 0.5)";    // reddish-brown tint
 export const PE_SELECT_COLOR = "#ff9800";                      // selection border
@@ -38,6 +39,7 @@ export const PE_TEXT_CTRL = "rgb(190, 120, 20)"; // orange-amber
 export const PE_TEXT_CTRL_SUB = "rgba(190, 120, 20, 0.7)";
 export const PE_TEXT_TASK = "rgb(70, 70, 80)"; // dark grey
 export const PE_TEXT_TASK_SUB = "rgba(70, 70, 80, 0.7)";
+export const PE_STALL_TEXT_NOP = "rgba(140, 160, 200, 0.6)"; // muted blue label
 export const PE_STALL_TEXT_WAVELET = "rgba(200, 180, 220, 0.7)"; // lavender label
 export const PE_STALL_TEXT_PIPE = "rgba(230, 200, 150, 0.7)"; // light orange label
 

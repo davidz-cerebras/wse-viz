@@ -1,7 +1,7 @@
 import {
   CELL_SIZE,
-  PE_COLOR_IDLE, PE_COLOR_EXEC, PE_COLOR_FP_ARITH, PE_COLOR_INT_ARITH, PE_COLOR_CTRL, PE_COLOR_TASK, PE_COLOR_MEM_READ, PE_COLOR_MEM_WRITE,
-  PE_STALL_TEXT_WAVELET, PE_STALL_TEXT_PIPE, PE_SELECT_COLOR,
+  PE_COLOR_IDLE, PE_COLOR_EXEC, PE_COLOR_FP_ARITH, PE_COLOR_INT_ARITH, PE_COLOR_CTRL, PE_COLOR_TASK, PE_COLOR_MEM_READ, PE_COLOR_MEM_WRITE, PE_COLOR_NOP,
+  PE_STALL_TEXT_NOP, PE_STALL_TEXT_WAVELET, PE_STALL_TEXT_PIPE, PE_SELECT_COLOR,
   PE_TEXT_DEFAULT, PE_TEXT_DEFAULT_SUB, PE_TEXT_CTRL, PE_TEXT_CTRL_SUB, PE_TEXT_TASK, PE_TEXT_TASK_SUB,
   DEMO_PE_ON_DURATION, DEMO_PE_BRIGHTEN_DURATION, DEMO_PE_DIM_DURATION,
 } from "./constants.js";
@@ -277,6 +277,8 @@ function _updateEntryColors(entry) {
 // _disabledCats is empty at this point, so _updateEntryColors produces the
 // same active-path values as the original inline logic.
 for (const entry of Object.values(SYMBOLIC_OPS)) {
+  // \u2102 (ℂ, double-struck C) is classified as text so it renders at the
+  // smaller text font size — the math font is too large for this glyph.
   entry.isText = /^[A-Z\u2102]/.test(entry.symbol);
   _updateEntryColors(entry);
 }
@@ -464,7 +466,7 @@ export class PE {
     if (!this.op && this.stallReason) {
       const fontSize = Math.min(FONT_SIZE_MAX_LABEL, FONT_SIZE_SCALE_LABEL / Math.max(1, this.stallReason.length));
       ctx.font = `${fontSize}px monospace`;
-      ctx.fillStyle = this.stall === "wavelet" ? PE_STALL_TEXT_WAVELET : PE_STALL_TEXT_PIPE;
+      ctx.fillStyle = this.stall === "nop" ? PE_STALL_TEXT_NOP : this.stall === "wavelet" ? PE_STALL_TEXT_WAVELET : PE_STALL_TEXT_PIPE;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(this.stallReason, this.cx, this.cy);

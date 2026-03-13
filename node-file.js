@@ -15,8 +15,8 @@ export class NodeFile {
       arrayBuffer() {
         const len = end - start;
         const buf = Buffer.alloc(len);
-        readSync(fd, buf, 0, len, start);
-        return Promise.resolve(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+        const bytesRead = readSync(fd, buf, 0, len, start);
+        return Promise.resolve(buf.buffer.slice(buf.byteOffset, buf.byteOffset + bytesRead));
       }
     };
   }

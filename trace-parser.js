@@ -141,6 +141,61 @@ function parsePipeStall(line) {
   };
 }
 
+// Extract a named field value from an IS OP line, e.g., "Dest:R5,R4" → "r5,r4"
+function _isField(text, name) {
+  const idx = text.indexOf(name + ":");
+  if (idx < 0) return null;
+  const start = idx + name.length + 1;
+  let end = start;
+  while (end < text.length && text.charCodeAt(end) !== 32 && text.charCodeAt(end) !== 9) end++;
+  return text.substring(start, end);
+}
+
+// Format an operand value for CASM display: lowercase, handle addr/imm notation
+function _fmtOperand(val) {
+  if (!val) return null;
+  // addr16(XXXX) / addr32(XXX) → [XXXX] (memory address)
+  const addrMatch = val.match(/^addr\d+\(([0-9a-fA-F]+)\)$/);
+  if (addrMatch) return `[0x${addrMatch[1]}]`;
+  // imm(XXXX) → 0xXXXX (immediate value)
+  const immMatch = val.match(/^imm\(([0-9a-fA-F]+)\)$/);
+  if (immMatch) return `0x${immMatch[1]}`;
+  // Register names and DSR references — lowercase
+  return val.toLowerCase();
+}
+
+// Build CASM-style operand string from an [IS OP] line.
+// E.g., "Dest:R1,R0  Src0:R1,R0  Src1:[S1DS4]" → "r1,r0 = r1,r0, [s1ds4]"
+function _buildCASMOperands(isAfter) {
+  const dest = _isField(isAfter, "Dest");
+  const src0 = _isField(isAfter, "Src0");
+  const src1 = _isField(isAfter, "Src1");
+
+  const fDest = _fmtOperand(dest);
+  const fSrc0 = _fmtOperand(src0);
+  const fSrc1 = _fmtOperand(src1);
+
+  // JMP: destination is IP, show only the target
+  if (dest === "IP" && fSrc1) return fSrc1;
+
+  // Build source list
+  const srcs = [];
+  if (fSrc0) srcs.push(fSrc0);
+  if (fSrc1) srcs.push(fSrc1);
+  const srcStr = srcs.join(", ");
+
+  // No destination (comparisons): just sources
+  if (!fDest && srcStr) return srcStr;
+
+  // Destination + sources: dst = src0, src1
+  if (fDest && srcStr) return `${fDest} = ${srcStr}`;
+
+  // Destination only (rare)
+  if (fDest) return fDest;
+
+  return null;
+}
+
 export class TraceParser {
   // Single-threaded parse: delegates to indexSegment for the full file, then compacts.
   static async index(file, onProgress) {
@@ -149,11 +204,13 @@ export class TraceParser {
     const waveletIndex = TraceParser._compactWavelets(seg.waveletTemp);
     const landingIndex = TraceParser._compactLandings(
       seg.tmpLandCycles, seg.tmpLandXs, seg.tmpLandYs, seg.tmpLandColors, seg.tmpLandDirs);
+    const pcIndex = TraceParser._rebuildPCMaps(seg.pcMaps);
     return {
       dimX: seg.dimX, dimY: seg.dimY, landingIndex, peStateIndex,
       opLookup: seg.opLookup, predLookup: seg.predLookup,
       waveletIndex, hasWaveletData: seg.hasWaveletData,
       minCycle: seg.minCycle, maxCycle: seg.maxCycle,
+      pcIndex,
     };
   }
 
@@ -174,10 +231,17 @@ export class TraceParser {
     const predIntern = new Map(); predIntern.set(null, 0); predIntern.set("???", 1);
     let nextOpId = 2, nextPredId = 2;
 
+    const pcMapTemp = new Map(); // key → Map<pc, { op, count, firstCycle, lastCycle, tasks }>
+
     function getPEEntry(key) {
       let e = peStateTemp.get(key);
-      if (!e) { e = { cycles: [], busy: [], opIds: [], predIds: [], stall: [], stallReasons: [] }; peStateTemp.set(key, e); }
+      if (!e) { e = { cycles: [], busy: [], opIds: [], predIds: [], stall: [], stallReasons: [], pcs: [] }; peStateTemp.set(key, e); }
       return e;
+    }
+    function getPCMap(key) {
+      let m = pcMapTemp.get(key);
+      if (!m) { m = new Map(); pcMapTemp.set(key, m); }
+      return m;
     }
     function internOp(op) {
       let id = opIntern.get(op);
@@ -203,7 +267,7 @@ export class TraceParser {
         if (!existing.some(r => r.reason === reason)) existing.push({ reason, type });
         return;
       }
-      pe.cycles.push(cycle); pe.busy.push(0); pe.opIds.push(0); pe.predIds.push(0);
+      pe.cycles.push(cycle); pe.busy.push(0); pe.opIds.push(0); pe.predIds.push(0); pe.pcs.push(0xFFFF);
       pe.stall.push(1); pe.stallReasons.push([{ reason, type }]);
     };
 
@@ -219,6 +283,40 @@ export class TraceParser {
       if (isFirst && dimX === 0) {
         const dimMatch = line.match(dimRegex);
         if (dimMatch) { dimX = parseInt(dimMatch[1]); dimY = parseInt(dimMatch[2]); return; }
+      }
+
+      // Capture operand text from [IS OP] lines for the code view.
+      // Transform into CASM-style assembly syntax.
+      const isIdx = line.indexOf("[IS OP]");
+      if (isIdx !== -1) {
+        const isIdle = line.charCodeAt(isIdx + 8) === 73; // 'I' for IDLE
+        if (!isIdle) {
+          const isSp1 = line.indexOf(" ", 1);
+          const isPIdx = isSp1 + 2;
+          const isDotIdx = line.indexOf(".", isPIdx);
+          const isColIdx = line.indexOf(":", isDotIdx);
+          if (isDotIdx >= 0 && isColIdx >= 0) {
+            const isX = +line.substring(isPIdx, isDotIdx);
+            const isY = +line.substring(isDotIdx + 1, isColIdx);
+            const isKey = `${isX},${isY}`;
+            const isAfter = line.substring(isIdx + 8);
+            const isPcEnd = isAfter.indexOf(":", 2);
+            if (isPcEnd > 4) {
+              const isPc = parseInt(isAfter.substring(4, isPcEnd), 16);
+              const m = getPCMap(isKey);
+              const existing = m.get(isPc);
+              if (existing && existing.operands) { /* already captured */ }
+              else {
+                const operands = _buildCASMOperands(isAfter);
+                if (operands) {
+                  if (existing) { existing.operands = operands; }
+                  else { m.set(isPc, { op: null, pred: null, count: 0, firstCycle: Infinity, lastCycle: -Infinity, operands }); }
+                }
+              }
+            }
+          }
+        }
+        return;
       }
 
       const exIdx = line.indexOf("[EX OP]");
@@ -237,20 +335,41 @@ export class TraceParser {
             prevExState.set(key, "0");
             const pe = getPEEntry(key);
             pe.cycles.push(+line.substring(1, sp1)); pe.busy.push(0);
-            pe.opIds.push(0); pe.predIds.push(0); pe.stall.push(0); pe.stallReasons.push(null);
+            pe.opIds.push(0); pe.predIds.push(0); pe.pcs.push(0xFFFF);
+            pe.stall.push(0); pe.stallReasons.push(null);
           }
         } else {
           const after = line.substring(exIdx + 8);
           const om = after.match(opcodeRegex);
           const pred = om ? (om[1] || null) : null;
           const op = om ? om[2] : null;
-          const exState = `1:${pred || ""}:${op || ""}`;
+          // Extract PC from "^ 0xHHHH: Tnn ..."
+          const pcEnd = after.indexOf(":", 2);
+          const pc = pcEnd > 4 ? parseInt(after.substring(4, pcEnd), 16) : 0;
+          const exState = `1:${pc}:${pred || ""}:${op || ""}`;
           if (prevExState.get(key) !== exState) {
             prevExState.set(key, exState);
             const pe = getPEEntry(key);
             pe.cycles.push(+line.substring(1, sp1)); pe.busy.push(1);
-            pe.opIds.push(internOp(op)); pe.predIds.push(internPred(pred));
+            pe.opIds.push(internOp(op)); pe.predIds.push(internPred(pred)); pe.pcs.push(pc);
             pe.stall.push(0); pe.stallReasons.push(null);
+          }
+          // Accumulate PC stats for memory-ordered view.
+          if (pcEnd > 4) {
+            const cycle = +line.substring(1, sp1);
+            const m = getPCMap(key);
+            let rec = m.get(pc);
+            if (!rec) {
+              rec = { op: flatStr(op || "?"), pred: pred ? flatStr(pred) : null, count: 0, firstCycle: cycle, lastCycle: cycle, operands: null };
+              m.set(pc, rec);
+            } else if (!rec.op) {
+              // IS OP created a placeholder — fill in op/pred from EX OP
+              rec.op = flatStr(op || "?");
+              rec.pred = pred ? flatStr(pred) : null;
+            }
+            rec.count++;
+            if (cycle < rec.firstCycle) rec.firstCycle = cycle;
+            rec.lastCycle = cycle;
           }
         }
         return;
@@ -357,12 +476,23 @@ export class TraceParser {
     const predLookup = new Array(nextPredId);
     for (const [str, id] of predIntern) predLookup[id] = str;
 
+    // Convert pcMap Sets to arrays for serialization (worker transfer)
+    const pcMaps = [];
+    for (const [key, m] of pcMapTemp) {
+      const entries = [];
+      for (const [pc, rec] of m) {
+        entries.push([pc, rec.op, rec.pred, rec.count, rec.firstCycle, rec.lastCycle, rec.operands || null]);
+      }
+      pcMaps.push([key, entries]);
+    }
+
     return {
       dimX, dimY, minCycle, maxCycle, hasWaveletData,
       peStateTemp: [...peStateTemp.entries()],
       waveletTemp: [...waveletTemp.entries()],
       tmpLandCycles, tmpLandXs, tmpLandYs, tmpLandColors, tmpLandDirs,
       opLookup, predLookup,
+      pcMaps,
     };
   }
 
@@ -438,7 +568,7 @@ export class TraceParser {
 
       for (const [key, pe] of seg.peStateTemp) {
         if (!mergedPE.has(key)) {
-          mergedPE.set(key, { cycles: [], busy: [], opIds: [], predIds: [], stall: [], stallReasons: [] });
+          mergedPE.set(key, { cycles: [], busy: [], opIds: [], predIds: [], pcs: [], stall: [], stallReasons: [] });
         }
         const dst = mergedPE.get(key);
 
@@ -448,7 +578,8 @@ export class TraceParser {
 
           if (!pe.stall[i]) {
             // Non-stall event: dedup against globalPrevExState (same logic as single-threaded)
-            const newState = pe.busy[i] ? `1:${predLookup[gPredId] || ""}:${opLookup[gOpId] || ""}` : "0";
+            const pcVal = pe.pcs ? pe.pcs[i] : 0xFFFF;
+            const newState = pe.busy[i] ? `1:${pcVal}:${predLookup[gPredId] || ""}:${opLookup[gOpId] || ""}` : "0";
             if (globalPrevExState.get(key) === newState) continue;
             globalPrevExState.set(key, newState);
           } else {
@@ -467,6 +598,7 @@ export class TraceParser {
           dst.busy.push(pe.busy[i]);
           dst.opIds.push(gOpId);
           dst.predIds.push(gPredId);
+          dst.pcs.push(pe.pcs ? pe.pcs[i] : 0xFFFF);
           dst.stall.push(pe.stall[i]);
           dst.stallReasons.push(pe.stallReasons[i]);
         }
@@ -481,7 +613,7 @@ export class TraceParser {
     // but straddling-line handling can produce out-of-order events at boundaries.
     for (const [, dst] of mergedPE) {
       TraceParser._sortParallelByCycle(dst.cycles,
-        dst.busy, dst.opIds, dst.predIds, dst.stall, dst.stallReasons);
+        dst.busy, dst.opIds, dst.predIds, dst.pcs, dst.stall, dst.stallReasons);
     }
 
     mp("Compacting PE state\u2026", 25);
@@ -539,10 +671,12 @@ export class TraceParser {
     mp("Sorting landings\u2026", 88);
     const landingIndex = TraceParser._compactLandings(allLandCycles, allLandXs, allLandYs, allLandColors, allLandDirs);
 
+    const pcIndex = TraceParser._mergePCMaps(segments);
+
     mp("Done", 100);
 
     return { dimX, dimY, landingIndex, peStateIndex, opLookup, predLookup,
-             waveletIndex, hasWaveletData, minCycle, maxCycle };
+             waveletIndex, hasWaveletData, minCycle, maxCycle, pcIndex };
   }
 
   // Sort parallel arrays by the cycles array. No-op if already sorted.
@@ -577,6 +711,44 @@ export class TraceParser {
     for (const arr of arrays) reorder(arr);
   }
 
+  // Rebuild pcMaps from serialized segment format back to Map<key, Map<pc, record>>
+  static _rebuildPCMaps(pcMaps) {
+    const index = new Map();
+    for (const [key, entries] of pcMaps) {
+      const m = new Map();
+      for (const [pc, op, pred, count, firstCycle, lastCycle, operands] of entries) {
+        m.set(pc, { op, pred, count, firstCycle, lastCycle, operands });
+      }
+      index.set(key, m);
+    }
+    return index;
+  }
+
+  // Merge pcMaps from multiple segments
+  static _mergePCMaps(segments) {
+    const merged = new Map();
+    for (const seg of segments) {
+      if (!seg.pcMaps) continue;
+      for (const [key, entries] of seg.pcMaps) {
+        let m = merged.get(key);
+        if (!m) { m = new Map(); merged.set(key, m); }
+        for (const [pc, op, pred, count, firstCycle, lastCycle, operands] of entries) {
+          let rec = m.get(pc);
+          if (!rec) {
+            rec = { op, pred, count: 0, firstCycle: Infinity, lastCycle: -Infinity, operands };
+            m.set(pc, rec);
+          }
+          if (!rec.op && op) { rec.op = op; rec.pred = pred; }
+          if (!rec.operands && operands) rec.operands = operands;
+          rec.count += count;
+          if (firstCycle < rec.firstCycle) rec.firstCycle = firstCycle;
+          if (lastCycle > rec.lastCycle) rec.lastCycle = lastCycle;
+        }
+      }
+    }
+    return merged;
+  }
+
   // --- Shared compaction helpers (used by both index and mergeSegments) ---
 
   static _compactPEState(peStateMap, onProgress) {
@@ -592,6 +764,7 @@ export class TraceParser {
         busy: new Uint8Array(pe.busy),
         opIds: new Uint8Array(pe.opIds),
         predIds: new Uint8Array(pe.predIds),
+        pcs: new Uint16Array(pe.pcs),
         stall: new Uint8Array(pe.stall),
         stallReasons: pe.stallReasons,
         length: len,
@@ -775,15 +948,19 @@ export class TraceParser {
       stallIdx = exIdx - 1;
     }
 
-    let busy = 0, opId = 0;
+    let busy = 0, opId = 0, isNop = false;
     if (exIdx >= 0) {
       opId = entry.opIds[exIdx];
-      if (opNopLookup[opId]) { busy = 0; opId = 0; }
+      if (opNopLookup[opId]) { busy = 0; opId = 0; isNop = true; }
       else busy = entry.busy[exIdx];
     }
 
     let stallType = null, stallReason = null;
-    if (stallIdx >= 0) {
+    // NOP takes first precedence as stall reason
+    if (isNop) {
+      stallType = "nop";
+      stallReason = "NOP";
+    } else if (stallIdx >= 0) {
       const reasons = entry.stallReasons[stallIdx];
       if (reasons && reasons.length > 0) {
         stallType = reasons[0].type;
