@@ -576,6 +576,8 @@ async function selectPEFromServer(row, col, traceX, traceY) {
   catch { if (myGen === peSelectGeneration) abortSelection(); return; }
   if (myGen !== peSelectGeneration) return;
 
+  if (!state) return; // cancelled while fetch was in-flight
+
   const entry = data.found ? data.entry : null;
   // Server provides stallLookup alongside the entry for stall ID resolution
   const tdWithStall = data.stallLookup ? { ...td, stallLookup: data.stallLookup } : td;
@@ -900,7 +902,11 @@ function seekToCycle(targetCycle) {
   // Reconstruct state without landings (seek uses frozen packets separately).
   // Returns a Promise in server mode (resolved immediately on cache hit).
   const ready = reconstructStateAtCycle(targetCycle);
-  lastReconstructedCycle = targetCycle;
+  // In local mode, reconstruction is synchronous — mark as done immediately.
+  // In server mode, reconstructFromServer sets lastReconstructedCycle when the
+  // fetch completes. Setting it eagerly here would cause updateReplayTick to
+  // skip reconstruction, leaving wavelets missing until the next seek.
+  if (!serverMode) lastReconstructedCycle = targetCycle;
 
   state.currentCycle = targetCycle;
   state.lastTickTime = performance.now();
@@ -958,6 +964,7 @@ export function cancelReplay() {
   scrubWasPlaying = false;
   serverMode = false;
   serverGeneration++;
+  if (pendingFetchAbort) { pendingFetchAbort.abort(); pendingFetchAbort = null; }
   pendingStateFetch = null;
   serverStateCache.clear();
   prefetchInFlight = 0;
@@ -1050,8 +1057,8 @@ function clearServerStatus() {
 }
 
 /** Fetch a single cycle from the server. Returns a Promise of the parsed response. */
-function fetchServerState(cycle) {
-  return fetch(`/api/state?cycle=${cycle}`)
+function fetchServerState(cycle, signal) {
+  return fetch(`/api/state?cycle=${cycle}`, signal ? { signal } : undefined)
     .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); });
 }
 
@@ -1060,6 +1067,8 @@ function fetchServerState(cycle) {
  * Returns a Promise that resolves when the grid state has been applied
  * (immediately for cache hits, after fetch for misses).
  */
+let pendingFetchAbort = null; // AbortController for the in-flight primary fetch
+
 function reconstructFromServer(targetCycle) {
   // Check cache first — if hit, apply synchronously (no latency)
   const cached = serverStateCache.get(targetCycle);
@@ -1072,20 +1081,21 @@ function reconstructFromServer(targetCycle) {
     return Promise.resolve();
   }
 
-  // Fetch from server (cache miss)
-  if (pendingStateFetch) return pendingStateFetch;
+  // Abort any previous in-flight primary fetch — the user has moved on
+  if (pendingFetchAbort) pendingFetchAbort.abort();
+  pendingFetchAbort = new AbortController();
+  const { signal } = pendingFetchAbort;
+
   if (state && state.playing) {
     console.warn(`[wse-viz] Cache miss at cycle ${targetCycle} (cache size: ${serverStateCache.size})`);
   }
-  pendingStateFetch = fetchServerState(targetCycle)
+  pendingStateFetch = fetchServerState(targetCycle, signal)
     .then(data => {
       pendingStateFetch = null;
+      pendingFetchAbort = null;
       if (serverError) { serverError = false; clearServerStatus(); }
       if (!state) return;
       serverStateCache.set(targetCycle, data);
-      // If the user scrubbed away while the fetch was in-flight, cache the
-      // data but don't apply it — the next reconstruction will use the cache.
-      if (state.currentCycle !== targetCycle) { animationLoop.start(); return; }
       applyServerState(data);
       lastReconstructedCycle = targetCycle;
       // Reset tick time so the next updateReplayTick doesn't see the time
@@ -1096,6 +1106,8 @@ function reconstructFromServer(targetCycle) {
     })
     .catch(err => {
       pendingStateFetch = null;
+      pendingFetchAbort = null;
+      if (err.name === "AbortError") return; // superseded by a newer seek
       serverError = true;
       if (state) {
         state.playing = false;

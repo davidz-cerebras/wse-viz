@@ -6,9 +6,13 @@ import { NodeFile } from "./node-file.js";
 import { TraceParser } from "./trace-parser.js";
 
 const { filePath, startByte, endByte, isFirst, segmentIndex } = workerData;
-const nf = new NodeFile(filePath);
-const result = await TraceParser.indexSegment(nf, startByte, endByte, isFirst, (pct) => {
-  parentPort.postMessage({ type: "progress", segmentIndex, pct });
-});
-nf.close();
-parentPort.postMessage({ type: "done", segmentIndex, result });
+try {
+  const nf = new NodeFile(filePath);
+  const result = await TraceParser.indexSegment(nf, startByte, endByte, isFirst, (pct) => {
+    parentPort.postMessage({ type: "progress", segmentIndex, pct });
+  });
+  nf.close();
+  parentPort.postMessage({ type: "done", segmentIndex, result });
+} catch (err) {
+  parentPort.postMessage({ type: "error", segmentIndex, message: err.message });
+}

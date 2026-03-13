@@ -213,7 +213,12 @@ function handlePETrace(x, y) {
 
   if (!entry) return JSON.stringify({ found: false });
 
-  // Send sparse entry data — client reconstructs flat arrays via _buildFlatPEState
+  // Build a minimal stallLookup containing only IDs this PE references
+  const stallArr = Array.from(entry.stall);
+  const usedIds = new Set(stallArr.filter(id => id !== 0));
+  const minStallLookup = new Array(Math.max(0, ...usedIds) + 1).fill(null);
+  for (const id of usedIds) minStallLookup[id] = td.stallLookup[id];
+
   return JSON.stringify({
     found: true,
     entry: {
@@ -223,9 +228,9 @@ function handlePETrace(x, y) {
       opIds: Array.from(entry.opIds),
       predIds: Array.from(entry.predIds),
       pcs: Array.from(entry.pcs),
-      stall: Array.from(entry.stall),
+      stall: stallArr,
     },
-    stallLookup: td.stallLookup,
+    stallLookup: minStallLookup,
   });
 }
 

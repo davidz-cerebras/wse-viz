@@ -112,16 +112,27 @@ function parseWaveletStall(line) {
 }
 
 function classifyPipeStall(msg) {
+  // Accumulator dependency (Pipe 7): "dependent accum0"
   const accumMatch = msg.match(/^dependent accum(\d)/);
-  if (accumMatch) return { label: `A${accumMatch[1]}` };
+  if (accumMatch) return { label: `ACC ${accumMatch[1]}` };
 
+  // Register interlock (Pipe 6): "R3 ilock"
   const regMatch = msg.match(/^(R\d+) ilock/);
   if (regMatch) return { label: flatStr(regMatch[1]) };
 
-  if (msg.startsWith("write_pending/read conflict MEM"))
-    return { label: "MEM" };
+  // Memory interlock (Pipe 6): "MEM[005c] ilock"
+  if (msg.includes("] ilock")) return { label: "MEM" };
 
-  const dsrMatch = msg.match(/^dependent (S\dDS\d)/);
+  // Write-read hazard (Pipe 5): "write_pending/read conflict MEM[addr](bank)"
+  if (msg.startsWith("write_pending/read conflict MEM"))
+    return { label: "MEM RAW" };
+
+  // Memory bank conflict (Pipe 5): "read conflict MEM[addr](bN)"
+  const bankMatch = msg.match(/^read conflict MEM\[[0-9a-f]+\]\(b(\d)\)/);
+  if (bankMatch) return { label: `BANK ${bankMatch[1]}` };
+
+  // DSR dependency (Pipe 2): "dependent S0DS0", "dependent S1DS12", "dependent DDS0"
+  const dsrMatch = msg.match(/^dependent ((?:S[01]|D)DS\d+)/);
   if (dsrMatch) return { label: flatStr(dsrMatch[1]) };
 
   return null;
@@ -1022,7 +1033,9 @@ export class TraceParser {
       const reasons = stallLookup[entry.stall[stallIdx]];
       if (reasons && reasons.length > 0) {
         stallType = reasons[0].type;
-        stallReason = reasons[0].reason;
+        stallReason = reasons.length > 1
+          ? reasons[0].reason + "\u2026"
+          : reasons[0].reason;
       }
     }
 
