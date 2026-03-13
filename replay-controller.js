@@ -14,7 +14,7 @@ let handleTraceGeneration = 0;
 let activeWorker = null; // current trace-loading worker, terminated on cancel/re-load
 
 // PE selection state
-let selectedPE = null; // { row, col, traceX, traceY, minCycle, totalCycles, busyArr, stallReasonArr, opArr, predArr, opCounts }
+let selectedPE = null; // { row, col, traceX, traceY, minCycle, totalCycles, busyArr, stallReasonArr, opArr, predArr, pcArr }
 let peTraceWindowStart = 0; // first cycle rendered in the current DOM window
 let peTraceWindowSize = 0;  // number of entries currently in the DOM
 let peTraceScrollLock = false; // prevents scroll-handler re-entrancy
@@ -34,18 +34,7 @@ let prefetchInFlight = 0; // number of prefetch requests currently in-flight
 let serverError = false; // true if last fetch failed
 
 /**
- * Strip dot-suffixes (.NF, .F, .T, etc.) from an opcode name and return
- * the base name, or null if the op is a NOP (which should be excluded from
- * busy-cycle accounting like the bar chart).
- */
-function _baseOpName(op) {
-  const base = (op || "?").split(".")[0];
-  return base === "NOP" ? null : base;
-}
-
-/**
  * Build flat per-cycle state arrays from a sparse PE state entry via forward-carry.
- * Returns { busyArr, opArr, predArr, stallReasonArr, opCounts }.
  */
 function _buildFlatPEState(entry, td, minCycle, maxCycle) {
   const totalCycles = maxCycle - minCycle + 1;
@@ -63,8 +52,7 @@ function _buildFlatPEState(entry, td, minCycle, maxCycle) {
       const cycle = minCycle + i;
       while (evtIdx < entry.length && entry.cycles[evtIdx] <= cycle) {
         if (entry.stall[evtIdx]) {
-          // Local mode: stall[i] is an interned ID, look up in stallLookup
-          // Server mode: stall[i] is 0/1, stallReasons is a plain array
+          // stall[i] is an interned ID; resolve via stallLookup
           curStallReason = td.stallLookup
             ? td.stallLookup[entry.stall[evtIdx]]
             : (entry.stallReasons ? entry.stallReasons[evtIdx] : null);
@@ -89,15 +77,7 @@ function _buildFlatPEState(entry, td, minCycle, maxCycle) {
     }
   }
 
-  const opCounts = new Map();
-  for (let i = 0; i < totalCycles; i++) {
-    if (busyArr[i]) {
-      const o = _baseOpName(opArr[i]);
-      if (o) opCounts.set(o, (opCounts.get(o) || 0) + 1);
-    }
-  }
-
-  return { busyArr, opArr, predArr, stallReasonArr, pcArr, opCounts, totalCycles };
+  return { busyArr, opArr, predArr, stallReasonArr, pcArr, totalCycles };
 }
 
 export function initReplay(deps) {

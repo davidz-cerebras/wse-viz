@@ -213,7 +213,7 @@ function handlePETrace(x, y) {
 
   if (!entry) return JSON.stringify({ found: false });
 
-  // Send sparse entry data — client reconstructs flat arrays and computes opCounts
+  // Send sparse entry data — client reconstructs flat arrays via _buildFlatPEState
   return JSON.stringify({
     found: true,
     entry: {
