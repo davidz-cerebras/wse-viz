@@ -129,6 +129,7 @@ const traceData = {
   opLookup: raw.opLookup,
   predLookup: raw.predLookup,
   opNopLookup,
+  stallLookup: raw.stallLookup,
   waveletList,
   wavPrefMaxLastCycle,
   hasWaveletData: raw.hasWaveletData,
@@ -170,7 +171,7 @@ function handleState(cycle) {
   const pes = [];
 
   for (const item of td.peStateList) {
-    const rec = TraceParser.reconstructPEAtCycle(item.entry, td.opNopLookup, cycle);
+    const rec = TraceParser.reconstructPEAtCycle(item.entry, td.opNopLookup, td.stallLookup, cycle);
     if (rec && (rec.busy || rec.opId || rec.stallType)) {
       pes.push([item.row, item.col, rec.busy, rec.opId, rec.stallType, rec.stallReason]);
     }
@@ -223,8 +224,8 @@ function handlePETrace(x, y) {
       predIds: Array.from(entry.predIds),
       pcs: Array.from(entry.pcs),
       stall: Array.from(entry.stall),
-      stallReasons: entry.stallReasons,
     },
+    stallLookup: td.stallLookup,
   });
 }
 

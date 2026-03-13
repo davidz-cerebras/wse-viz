@@ -59,8 +59,6 @@ function init() {
     iterationValue: document.getElementById("iterationValue"),
     stepValue: document.getElementById("stepValue"),
     operationValue: document.getElementById("operationValue"),
-    opChart: document.getElementById("opChart"),
-    panelResizer: document.getElementById("panelResizer"),
     undoZoomBtn: document.getElementById("undoZoomBtn"),
     resetZoomBtn: document.getElementById("resetZoomBtn"),
     zoomOverlay: document.getElementById("zoomOverlay"),

@@ -148,6 +148,7 @@ function postResult(traceData) {
       dimY: traceData.dimY,
       landingIndex: traceData.landingIndex,
       peStateEntries,
+      stallLookup: traceData.stallLookup,
       opLookup: traceData.opLookup,
       predLookup: traceData.predLookup,
       waveletEntries,

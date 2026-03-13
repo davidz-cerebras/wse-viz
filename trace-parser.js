@@ -148,7 +148,7 @@ function _isField(text, name) {
   const start = idx + name.length + 1;
   let end = start;
   while (end < text.length && text.charCodeAt(end) !== 32 && text.charCodeAt(end) !== 9) end++;
-  return text.substring(start, end);
+  return flatStr(text.substring(start, end));
 }
 
 // Format an operand value for CASM display: lowercase, handle addr/imm notation
@@ -200,13 +200,13 @@ export class TraceParser {
   // Single-threaded parse: delegates to indexSegment for the full file, then compacts.
   static async index(file, onProgress) {
     const seg = await TraceParser.indexSegment(file, 0, file.size, true, onProgress);
-    const peStateIndex = TraceParser._compactPEState(seg.peStateTemp);
+    const { peStateIndex, stallLookup } = TraceParser._compactPEState(seg.peStateTemp);
     const waveletIndex = TraceParser._compactWavelets(seg.waveletTemp);
     const landingIndex = TraceParser._compactLandings(
       seg.tmpLandCycles, seg.tmpLandXs, seg.tmpLandYs, seg.tmpLandColors, seg.tmpLandDirs);
     const pcIndex = TraceParser._rebuildPCMaps(seg.pcMaps);
     return {
-      dimX: seg.dimX, dimY: seg.dimY, landingIndex, peStateIndex,
+      dimX: seg.dimX, dimY: seg.dimY, landingIndex, peStateIndex, stallLookup,
       opLookup: seg.opLookup, predLookup: seg.predLookup,
       waveletIndex, hasWaveletData: seg.hasWaveletData,
       minCycle: seg.minCycle, maxCycle: seg.maxCycle,
@@ -309,8 +309,9 @@ export class TraceParser {
               else {
                 const operands = _buildCASMOperands(isAfter);
                 if (operands) {
-                  if (existing) { existing.operands = operands; }
-                  else { m.set(isPc, { op: null, pred: null, count: 0, firstCycle: Infinity, lastCycle: -Infinity, operands }); }
+                  const flatOps = flatStr(operands);
+                  if (existing) { existing.operands = flatOps; }
+                  else { m.set(isPc, { op: null, pred: null, count: 0, firstCycle: Infinity, lastCycle: -Infinity, operands: flatOps }); }
                 }
               }
             }
@@ -366,6 +367,11 @@ export class TraceParser {
               // IS OP created a placeholder — fill in op/pred from EX OP
               rec.op = flatStr(op || "?");
               rec.pred = pred ? flatStr(pred) : null;
+            } else if (rec.op !== "????????" && op && rec.op !== flatStr(op)) {
+              // Self-modifying code: different instruction at same address
+              rec.op = "????????";
+              rec.pred = null;
+              rec.operands = "SELF-MODIFYING CODE";
             }
             rec.count++;
             if (cycle < rec.firstCycle) rec.firstCycle = cycle;
@@ -617,7 +623,7 @@ export class TraceParser {
     }
 
     mp("Compacting PE state\u2026", 25);
-    const peStateIndex = TraceParser._compactPEState(mergedPE, (f) => mp("Compacting PE state\u2026", 25 + f * 10));
+    const { peStateIndex, stallLookup } = TraceParser._compactPEState(mergedPE, (f) => mp("Compacting PE state\u2026", 25 + f * 10));
 
     mp("Merging wavelets\u2026", 35);
     // 4. Merge wavelet hops: concatenate per-ident arrays across segments
@@ -675,7 +681,7 @@ export class TraceParser {
 
     mp("Done", 100);
 
-    return { dimX, dimY, landingIndex, peStateIndex, opLookup, predLookup,
+    return { dimX, dimY, landingIndex, peStateIndex, stallLookup, opLookup, predLookup,
              waveletIndex, hasWaveletData, minCycle, maxCycle, pcIndex };
   }
 
@@ -753,24 +759,47 @@ export class TraceParser {
 
   static _compactPEState(peStateMap, onProgress) {
     const peStateIndex = new Map();
+    // Intern unique stall reason combinations into a shared lookup table.
+    // ID 0 = no stall; IDs 1+ map to reason arrays.
+    const stallIntern = new Map(); // canonicalKey → id
+    const stallLookup = [null]; // id → [{reason, type}, ...]
+    let nextStallId = 1;
+
+    function internStallReasons(reasons) {
+      if (!reasons) return 0;
+      // Build a canonical key from sorted reason strings
+      const key = reasons.map(r => `${r.type}:${r.reason}`).sort().join("|");
+      let id = stallIntern.get(key);
+      if (id !== undefined) return id;
+      if (nextStallId > 65535) return 1; // overflow → first entry
+      id = nextStallId++;
+      stallIntern.set(key, id);
+      stallLookup.push(reasons);
+      return id;
+    }
+
     const total = peStateMap.size ?? peStateMap.length;
     let idx = 0;
     for (const [key, pe] of peStateMap) {
       if (onProgress && idx % 200 === 0) onProgress(idx / total);
       idx++;
       const len = pe.cycles.length;
+      // Replace stall (0/1 flag) with interned stall reason IDs in a Uint16Array
+      const stallIds = new Uint16Array(len);
+      for (let i = 0; i < len; i++) {
+        if (pe.stall[i]) stallIds[i] = internStallReasons(pe.stallReasons[i]);
+      }
       peStateIndex.set(key, {
         cycles: new Float64Array(pe.cycles),
         busy: new Uint8Array(pe.busy),
         opIds: new Uint8Array(pe.opIds),
         predIds: new Uint8Array(pe.predIds),
         pcs: new Uint16Array(pe.pcs),
-        stall: new Uint8Array(pe.stall),
-        stallReasons: pe.stallReasons,
+        stall: stallIds,
         length: len,
       });
     }
-    return peStateIndex;
+    return { peStateIndex, stallLookup };
   }
 
   static _compactWavelets(waveletMap, onProgress) {
@@ -963,7 +992,7 @@ export class TraceParser {
    * The backward scan finds the most recent EX event and the most recent stall,
    * including same-cycle stall+exec coexistence.
    */
-  static reconstructPEAtCycle(entry, opNopLookup, targetCycle) {
+  static reconstructPEAtCycle(entry, opNopLookup, stallLookup, targetCycle) {
     const found = TraceParser.findCycleIndexLE(entry.cycles, entry.length, targetCycle);
     if (found < 0) return null;
 
@@ -990,7 +1019,7 @@ export class TraceParser {
       stallType = "nop";
       stallReason = "NOP";
     } else if (stallIdx >= 0) {
-      const reasons = entry.stallReasons[stallIdx];
+      const reasons = stallLookup[entry.stall[stallIdx]];
       if (reasons && reasons.length > 0) {
         stallType = reasons[0].type;
         stallReason = reasons[0].reason;

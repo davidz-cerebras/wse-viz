@@ -63,7 +63,11 @@ function _buildFlatPEState(entry, td, minCycle, maxCycle) {
       const cycle = minCycle + i;
       while (evtIdx < entry.length && entry.cycles[evtIdx] <= cycle) {
         if (entry.stall[evtIdx]) {
-          curStallReason = entry.stallReasons[evtIdx];
+          // Local mode: stall[i] is an interned ID, look up in stallLookup
+          // Server mode: stall[i] is 0/1, stallReasons is a plain array
+          curStallReason = td.stallLookup
+            ? td.stallLookup[entry.stall[evtIdx]]
+            : (entry.stallReasons ? entry.stallReasons[evtIdx] : null);
           curStallCycle = entry.cycles[evtIdx];
         } else {
           const opId = entry.opIds[evtIdx];
@@ -159,9 +163,9 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
   const cols = grid.cols;
   const pes = grid.pes;
   for (const item of td.peStateList) {
-    if (item.row >= rows || item.col >= cols) continue;
+    if (item.row < 0 || item.row >= rows || item.col < 0 || item.col >= cols) continue;
     const pe = pes[item.row * cols + item.col];
-    const rec = TraceParser.reconstructPEAtCycle(item.entry, td.opNopLookup, targetCycle);
+    const rec = TraceParser.reconstructPEAtCycle(item.entry, td.opNopLookup, td.stallLookup, targetCycle);
     if (rec) {
       if (rec.busy) {
         pe.setBusy(true, td.opLookup[rec.opId], td.opEntryLookup[rec.opId]);
@@ -238,9 +242,8 @@ export function selectPE(row, col, traceX, traceY) {
   selectedPE = { row, col, traceX, traceY, minCycle, ...flat };
 
   // Update panel header
-  els.tracePanel.querySelector("h2").textContent = `P${traceX}.${traceY} Trace`;
+  els.tracePanel.querySelector("h2").textContent = `P${traceX}.${traceY}`;
 
-  renderOpChart();
   renderPETraceWindow(state.currentCycle);
   setupPETraceScroll();
   applyTraceTab();
@@ -257,82 +260,52 @@ function applyTraceTab() {
   }
 }
 
-function renderOpChart() {
-  if (!selectedPE) return;
-  const { opCounts } = selectedPE;
+function _buildTraceEntry(i) {
+  const { minCycle, busyArr, stallReasonArr, opArr, predArr } = selectedPE;
+  const cycle = minCycle + i;
+  const busy = busyArr[i];
+  const stallReasons = stallReasonArr[i];
+  const entry = document.createElement("div");
+  entry.className = "trace-entry";
+  entry.dataset.idx = i;
 
-  els.opChart.innerHTML = "";
+  const cycleSpan = document.createElement("span");
+  cycleSpan.className = "trace-cycle";
+  cycleSpan.textContent = `@${cycle}`;
+  entry.appendChild(cycleSpan);
 
-  if (opCounts.size === 0) {
-    els.opChart.classList.add("hidden");
-    els.panelResizer.classList.add("hidden");
-    return;
+  const cSpan = document.createElement("span");
+  if (stallReasons) {
+    cSpan.className = "trace-pipe-stage trace-stall";
+    cSpan.textContent = stallReasons.length > 1
+      ? stallReasons[0].reason + "\u2026"
+      : stallReasons[0].reason;
+  } else {
+    cSpan.className = "trace-pipe-stage trace-pipe-empty";
+    cSpan.textContent = "\u2014";
   }
+  entry.appendChild(cSpan);
 
-  els.opChart.classList.remove("hidden");
-  els.panelResizer.classList.remove("hidden");
-
-  // Sort by count descending
-  const sorted = [...opCounts.entries()].sort((a, b) => b[1] - a[1]);
-  const maxCount = sorted[0][1];
-
-  for (const [op, count] of sorted) {
-    const row = document.createElement("div");
-    row.className = "op-chart-row";
-    row.dataset.op = op;
-
-    const label = document.createElement("span");
-    label.className = "op-chart-label";
-    label.textContent = op;
-
-    const barContainer = document.createElement("div");
-    barContainer.className = "op-chart-bar-container";
-
-    const bar = document.createElement("div");
-    bar.className = "op-chart-bar";
-    bar.style.width = `${(count / maxCount) * 100}%`;
-
-    const countSpan = document.createElement("span");
-    countSpan.className = "op-chart-count";
-    countSpan.textContent = count;
-
-    barContainer.appendChild(bar);
-    barContainer.appendChild(countSpan);
-    row.appendChild(label);
-    row.appendChild(barContainer);
-    els.opChart.appendChild(row);
+  const instrSpan = document.createElement("span");
+  instrSpan.className = "trace-pipe-stage";
+  if (predArr[i]) {
+    const predSpan = document.createElement("span");
+    predSpan.className = "trace-pred";
+    predSpan.textContent = predArr[i] + " ";
+    instrSpan.appendChild(predSpan);
   }
+  const opText = document.createElement("span");
+  opText.className = busy ? "trace-exec" : "trace-idle";
+  opText.textContent = busy ? (opArr[i] || "?") : (opArr[i] || "IDLE");
+  instrSpan.appendChild(opText);
+  entry.appendChild(instrSpan);
 
-  // Default height: show ~4.5 rows to hint that scrolling reveals more
-  els.opChart.style.maxHeight = "";
-  if (sorted.length > 4) {
-    requestAnimationFrame(() => {
-      const firstRow = els.opChart.querySelector(".op-chart-row");
-      if (firstRow) {
-        const rowH = firstRow.offsetHeight + 4; // 4px gap
-        const padding = 16; // 0.5rem * 2
-        els.opChart.style.maxHeight = `${Math.round(rowH * 4.5 + padding)}px`;
-      }
-    });
-  }
-}
-
-function updateOpChartHighlight() {
-  if (!selectedPE || !state) return;
-  const idx = state.currentCycle - selectedPE.minCycle;
-  let currentOp = null;
-  if (idx >= 0 && idx < selectedPE.totalCycles && selectedPE.busyArr[idx]) {
-    currentOp = _baseOpName(selectedPE.opArr[idx]);
-  }
-
-  for (const row of els.opChart.children) {
-    row.classList.toggle("active", row.dataset.op === currentOp);
-  }
+  return entry;
 }
 
 function renderPETraceWindow(centerCycle) {
   if (!selectedPE) return;
-  const { minCycle, totalCycles, busyArr, stallReasonArr, opArr, predArr } = selectedPE;
+  const { minCycle, totalCycles } = selectedPE;
 
   const centerIdx = Math.max(0, Math.min(centerCycle - minCycle, totalCycles - 1));
   const halfWin = Math.floor(PE_TRACE_WINDOW / 2);
@@ -340,54 +313,10 @@ function renderPETraceWindow(centerCycle) {
   let endIdx = Math.min(totalCycles, startIdx + PE_TRACE_WINDOW);
   startIdx = Math.max(0, endIdx - PE_TRACE_WINDOW);
 
-  // Skip re-render if window hasn't changed
-  if (peTraceWindowStart === startIdx && peTraceWindowSize === endIdx - startIdx) {
-    updatePETraceHighlight();
-    return;
-  }
-
   els.traceLog.innerHTML = "";
   const frag = document.createDocumentFragment();
-
   for (let i = startIdx; i < endIdx; i++) {
-    const cycle = minCycle + i;
-    const busy = busyArr[i];
-    const stallReasons = stallReasonArr[i];
-    const entry = document.createElement("div");
-    entry.className = "trace-entry";
-    entry.dataset.cycle = cycle;
-
-    const cycleSpan = document.createElement("span");
-    cycleSpan.className = "trace-cycle";
-    cycleSpan.textContent = `@${cycle}`;
-    entry.appendChild(cycleSpan);
-
-    // Stall reason (show first reason, ellipsis if multiple)
-    const cSpan = document.createElement("span");
-    if (stallReasons) {
-      cSpan.className = "trace-pipe-stage trace-stall";
-      cSpan.textContent = stallReasons.length > 1
-        ? stallReasons[0].reason + "\u2026"
-        : stallReasons[0].reason;
-    } else {
-      cSpan.className = "trace-pipe-stage trace-pipe-empty";
-      cSpan.textContent = "\u2014";
-    }
-    entry.appendChild(cSpan);
-
-    // Predicate prefix
-    const predSpan = document.createElement("span");
-    predSpan.className = "trace-pipe-stage trace-pred";
-    predSpan.textContent = predArr[i] || "";
-    entry.appendChild(predSpan);
-
-    // E stage (Execute)
-    const eSpan = document.createElement("span");
-    eSpan.className = busy ? "trace-pipe-stage trace-exec" : "trace-pipe-stage trace-idle";
-    eSpan.textContent = busy ? (opArr[i] || "?") : (opArr[i] || "IDLE");
-    entry.appendChild(eSpan);
-
-    frag.appendChild(entry);
+    frag.appendChild(_buildTraceEntry(i));
   }
   els.traceLog.appendChild(frag);
 
@@ -395,6 +324,78 @@ function renderPETraceWindow(centerCycle) {
   peTraceWindowSize = endIdx - startIdx;
 
   updatePETraceHighlight();
+}
+
+/** Extend the rendered window by appending/prepending entries without replacing. */
+let _traceEntryHeight = 0; // cached height of one trace entry (all are identical)
+
+function _getEntryHeight() {
+  // Always re-measure — a single offsetHeight read is cheap (one reflow),
+  // and this ensures correctness after browser zoom/resize/DPI changes.
+  const first = els.traceLog.firstChild;
+  if (first) _traceEntryHeight = first.offsetHeight;
+  return _traceEntryHeight || 18; // fallback
+}
+
+function _extendTraceWindow(direction) {
+  if (!selectedPE) return;
+  const { totalCycles } = selectedPE;
+  const log = els.traceLog;
+  const CHUNK = Math.floor(PE_TRACE_WINDOW / 4);
+  const rowH = _getEntryHeight();
+
+  if (direction > 0) {
+    // Append at bottom, remove from top
+    const newEnd = Math.min(totalCycles, peTraceWindowStart + peTraceWindowSize + CHUNK);
+    const addCount = newEnd - (peTraceWindowStart + peTraceWindowSize);
+    if (addCount <= 0) return;
+
+    const frag = document.createDocumentFragment();
+    for (let i = peTraceWindowStart + peTraceWindowSize; i < newEnd; i++) {
+      frag.appendChild(_buildTraceEntry(i));
+    }
+    log.appendChild(frag);
+    peTraceWindowSize += addCount;
+
+    // Remove excess from top to keep window bounded
+    const excess = peTraceWindowSize - PE_TRACE_WINDOW;
+    if (excess > 0) {
+      const scrollBefore = log.scrollTop;
+      for (let j = 0; j < excess; j++) {
+        if (!log.firstChild) break;
+        log.firstChild.remove();
+      }
+      peTraceWindowStart += excess;
+      peTraceWindowSize -= excess;
+      log.scrollTop = scrollBefore - excess * rowH;
+    }
+  } else {
+    // Prepend at top, remove from bottom
+    const newStart = Math.max(0, peTraceWindowStart - CHUNK);
+    const addCount = peTraceWindowStart - newStart;
+    if (addCount <= 0) return;
+
+    const scrollBefore = log.scrollTop;
+    const frag = document.createDocumentFragment();
+    for (let i = newStart; i < peTraceWindowStart; i++) {
+      frag.appendChild(_buildTraceEntry(i));
+    }
+    log.prepend(frag);
+    log.scrollTop = scrollBefore + addCount * rowH;
+
+    peTraceWindowStart = newStart;
+    peTraceWindowSize += addCount;
+
+    // Remove excess from bottom
+    const excess = peTraceWindowSize - PE_TRACE_WINDOW;
+    if (excess > 0) {
+      for (let j = 0; j < excess; j++) {
+        if (!log.lastChild) break;
+        log.lastChild.remove();
+      }
+      peTraceWindowSize -= excess;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -541,27 +542,27 @@ function updateCodeViewHighlight() {
   }
   if (activeEl && activeEl !== _lastCodeScrolled) {
     _lastCodeScrolled = activeEl;
-    activeEl.scrollIntoView({ block: "nearest" });
+    activeEl.scrollIntoView({ block: "center" });
   } else if (!activeEl) {
     _lastCodeScrolled = null;
   }
 }
 
 function setupPETraceScroll() {
-  // Re-render window when user scrolls to edges
   els.traceLog.onscroll = () => {
     if (!selectedPE || peTraceScrollLock) return;
     const log = els.traceLog;
-    const atTop = log.scrollTop < 40;
-    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    const nearTop = log.scrollTop < 80;
+    const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
 
-    if (atTop && peTraceWindowStart > 0) {
+    if (nearTop && peTraceWindowStart > 0) {
       peTraceScrollLock = true;
-      try { renderPETraceWindow(selectedPE.minCycle + peTraceWindowStart - 1); }
+      try { _extendTraceWindow(-1); }
       finally { peTraceScrollLock = false; }
-    } else if (atBottom && peTraceWindowStart + peTraceWindowSize < selectedPE.totalCycles) {
+    }
+    if (nearBottom && peTraceWindowStart + peTraceWindowSize < selectedPE.totalCycles) {
       peTraceScrollLock = true;
-      try { renderPETraceWindow(selectedPE.minCycle + peTraceWindowStart + peTraceWindowSize); }
+      try { _extendTraceWindow(1); }
       finally { peTraceScrollLock = false; }
     }
   };
@@ -578,22 +579,30 @@ async function selectPEFromServer(row, col, traceX, traceY) {
   const td = traceData;
   const { minCycle, maxCycle } = state;
 
+  // On failure, clean up the visual state we set eagerly above
+  function abortSelection() {
+    grid.deselectAllPEs();
+    els.tracePanel.classList.add("hidden");
+    requestAnimationFrame(resizeCanvas);
+  }
+
   let resp;
   try { resp = await fetch(`/api/pe-trace?x=${traceX}&y=${traceY}`); }
-  catch { if (myGen === peSelectGeneration) deselectPE(); return; }
+  catch { if (myGen === peSelectGeneration) abortSelection(); return; }
   if (myGen !== peSelectGeneration) return;
 
   let data;
   try { data = await resp.json(); }
-  catch { if (myGen === peSelectGeneration) deselectPE(); return; }
+  catch { if (myGen === peSelectGeneration) abortSelection(); return; }
   if (myGen !== peSelectGeneration) return;
 
   const entry = data.found ? data.entry : null;
-  const flat = _buildFlatPEState(entry, td, minCycle, maxCycle);
+  // Server provides stallLookup alongside the entry for stall ID resolution
+  const tdWithStall = data.stallLookup ? { ...td, stallLookup: data.stallLookup } : td;
+  const flat = _buildFlatPEState(entry, tdWithStall, minCycle, maxCycle);
 
   selectedPE = { row, col, traceX, traceY, minCycle, ...flat };
-  els.tracePanel.querySelector("h2").textContent = `P${traceX}.${traceY} Trace`;
-  renderOpChart();
+  els.tracePanel.querySelector("h2").textContent = `P${traceX}.${traceY}`;
   renderPETraceWindow(state.currentCycle);
   setupPETraceScroll();
   applyTraceTab();
@@ -605,21 +614,15 @@ export function deselectPE() {
   selectedPE = null;
   peTraceWindowStart = 0;
   peTraceWindowSize = 0;
+  _traceEntryHeight = 0;
   _highlightedEntry = null;
   _lastScrolledEntry = null;
   els.traceLog.onscroll = null;
 
   els.tracePanel.classList.add("hidden");
   requestAnimationFrame(resizeCanvas);
-  els.tracePanel.querySelector("h2").textContent = "Trace Events";
+  els.tracePanel.querySelector("h2").textContent = "";
   els.traceLog.innerHTML = "";
-  els.opChart.innerHTML = "";
-  els.opChart.classList.add("hidden");
-  els.panelResizer.classList.add("hidden");
-  // Reset any explicit flex sizing from drag
-  els.traceLog.style.flex = "";
-  els.opChart.style.flex = "";
-  els.opChart.style.maxHeight = "";
   // Reset code view data (but preserve activeTraceTab across PE switches)
   codeViewData = null;
   _lastCodeScrolled = null;
@@ -639,26 +642,37 @@ function updatePETraceHighlight() {
   // Remove previous highlight
   if (_highlightedEntry) { _highlightedEntry.classList.remove("current"); _highlightedEntry = null; }
 
-  // If current cycle is outside the rendered window, re-render around it
-  if (idx >= 0 && idx < selectedPE.totalCycles) {
-    if (localIdx < 0 || localIdx >= peTraceWindowSize) {
-      renderPETraceWindow(state.currentCycle);
-      return; // renderPETraceWindow calls us recursively
-    }
-    const entries = els.traceLog.children;
-    if (localIdx < entries.length) {
-      _highlightedEntry = entries[localIdx];
-      _highlightedEntry.classList.add("current");
-      if (_lastScrolledEntry !== _highlightedEntry) {
-        _lastScrolledEntry = _highlightedEntry;
-        peTraceScrollLock = true;
-        try { entries[localIdx].scrollIntoView({ block: "nearest" }); }
-        finally { peTraceScrollLock = false; }
-      }
-    }
+  if (idx < 0 || idx >= selectedPE.totalCycles) return;
+
+  // If current cycle is outside the rendered window, re-render centered on it
+  if (localIdx < 0 || localIdx >= peTraceWindowSize) {
+    renderPETraceWindow(state.currentCycle);
+    return; // renderPETraceWindow calls us recursively
   }
 
-  updateOpChartHighlight();
+  // If near the edges of the window, extend incrementally
+  if (localIdx < PE_TRACE_WINDOW / 4 && peTraceWindowStart > 0) {
+    peTraceScrollLock = true;
+    try { _extendTraceWindow(-1); } finally { peTraceScrollLock = false; }
+  } else if (localIdx > peTraceWindowSize - PE_TRACE_WINDOW / 4 &&
+             peTraceWindowStart + peTraceWindowSize < selectedPE.totalCycles) {
+    peTraceScrollLock = true;
+    try { _extendTraceWindow(1); } finally { peTraceScrollLock = false; }
+  }
+
+  // Recompute localIdx after possible extension
+  const newLocalIdx = idx - peTraceWindowStart;
+  const entries = els.traceLog.children;
+  if (newLocalIdx >= 0 && newLocalIdx < entries.length) {
+    _highlightedEntry = entries[newLocalIdx];
+    _highlightedEntry.classList.add("current");
+    if (_lastScrolledEntry !== _highlightedEntry) {
+      _lastScrolledEntry = _highlightedEntry;
+      peTraceScrollLock = true;
+      try { _highlightedEntry.scrollIntoView({ block: "center" }); }
+      finally { peTraceScrollLock = false; }
+    }
+  }
 }
 
 function updateScrubUI() {
@@ -1022,7 +1036,7 @@ function applyServerState(data) {
 
   for (const rec of data.pes) {
     const [row, col, busy, opId, stallType, stallReason] = rec;
-    if (row >= grid.rows || col >= cols) continue;
+    if (row < 0 || row >= grid.rows || col < 0 || col >= cols) continue;
     const pe = pes[row * cols + col];
     if (busy || opId) {
       pe.setBusy(!!busy, td.opLookup[opId] ?? null, td.opEntryLookup[opId] ?? null);
@@ -1268,6 +1282,7 @@ export function handleTraceFile(event, setGrid) {
         waveletList,
         wavPrefMaxLastCycle,
         hasWaveletData: d.hasWaveletData,
+        stallLookup: d.stallLookup,
         minCycle: d.minCycle,
         maxCycle: d.maxCycle,
         pcIndex,
@@ -1300,8 +1315,9 @@ export function handleTraceFile(event, setGrid) {
 function handleTraceLogClick(e) {
   if (!selectedPE || !state) return;
   const entry = e.target.closest(".trace-entry");
-  if (!entry || !entry.dataset.cycle) return;
-  seekToCycle(parseInt(entry.dataset.cycle, 10));
+  if (!entry || entry.dataset.idx === undefined) return;
+  const cycle = selectedPE.minCycle + parseInt(entry.dataset.idx, 10);
+  seekToCycle(cycle);
 }
 
 export function setupScrubListeners() {
@@ -1330,35 +1346,4 @@ export function setupScrubListeners() {
     seekToCycle(parseInt(e.target.value, 10));
   });
 
-  // Panel resizer drag
-  els.panelResizer.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    els.panelResizer.classList.add("dragging");
-    els.panelResizer.setPointerCapture(e.pointerId);
-    els.opChart.style.maxHeight = ""; // remove default cap so resizer is unconstrained
-
-    const startY = e.clientY;
-    const logStart = els.traceLog.getBoundingClientRect().height;
-    const chartStart = els.opChart.getBoundingClientRect().height;
-
-    const onMove = (ev) => {
-      const dy = ev.clientY - startY;
-      const newLog = Math.max(60, logStart + dy);
-      const newChart = Math.max(60, chartStart - dy);
-      const sum = newLog + newChart;
-      els.traceLog.style.flex = `${newLog / sum}`;
-      els.opChart.style.flex = `${newChart / sum}`;
-    };
-
-    const onUp = () => {
-      els.panelResizer.classList.remove("dragging");
-      els.panelResizer.removeEventListener("pointermove", onMove);
-      els.panelResizer.removeEventListener("pointerup", onUp);
-      els.panelResizer.removeEventListener("pointercancel", onUp);
-    };
-
-    els.panelResizer.addEventListener("pointermove", onMove);
-    els.panelResizer.addEventListener("pointerup", onUp);
-    els.panelResizer.addEventListener("pointercancel", onUp);
-  });
 }
