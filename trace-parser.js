@@ -176,15 +176,19 @@ function _fmtOperand(val) {
 }
 
 // Build CASM-style operand string from an [IS OP] line.
-// E.g., "Dest:R1,R0  Src0:R1,R0  Src1:[S1DS4]" → "r1,r0 = r1,r0, [s1ds4]"
+// Extracts Dest, Src0, Src1, Src2 (3-source ops like FMAC), and Imm fields.
+// E.g., "Dest:[S0DS5]  Src0:[S0DS5]  Src1:[S1DS3]  Src2:R2" → "[s0ds5] = [s0ds5], [s1ds3], r2"
 function _buildCASMOperands(isAfter) {
   const dest = _isField(isAfter, "Dest");
   const src0 = _isField(isAfter, "Src0");
   const src1 = _isField(isAfter, "Src1");
+  const src2 = _isField(isAfter, "Src2");
+  const imm  = _isField(isAfter, "Imm");
 
   const fDest = _fmtOperand(dest);
   const fSrc0 = _fmtOperand(src0);
   const fSrc1 = _fmtOperand(src1);
+  const fSrc2 = _fmtOperand(src2);
 
   // JMP: destination is IP, show only the target
   if (dest === "IP" && fSrc1) return fSrc1;
@@ -193,12 +197,19 @@ function _buildCASMOperands(isAfter) {
   const srcs = [];
   if (fSrc0) srcs.push(fSrc0);
   if (fSrc1) srcs.push(fSrc1);
+  if (fSrc2) srcs.push(fSrc2);
+  // Show Imm when it carries independent information (not already in an addr/imm operand)
+  if (imm && !src0?.startsWith("addr") && !src0?.startsWith("imm(") &&
+             !src1?.startsWith("addr") && !src1?.startsWith("imm(") &&
+             !dest?.startsWith("addr") && !dest?.startsWith("imm(")) {
+    srcs.push(`0x${imm}`);
+  }
   const srcStr = srcs.join(", ");
 
   // No destination (comparisons): just sources
   if (!fDest && srcStr) return srcStr;
 
-  // Destination + sources: dst = src0, src1
+  // Destination + sources: dst = src0, src1[, src2]
   if (fDest && srcStr) return `${fDest} = ${srcStr}`;
 
   // Destination only (rare)
