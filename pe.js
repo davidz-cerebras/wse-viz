@@ -1,6 +1,6 @@
 import {
   CELL_SIZE,
-  PE_COLOR_IDLE, PE_COLOR_EXEC, PE_COLOR_FP_ARITH, PE_COLOR_INT_ARITH, PE_COLOR_CTRL, PE_COLOR_TASK, PE_COLOR_MEM_READ, PE_COLOR_MEM_WRITE, PE_COLOR_NOP,
+  PE_COLOR_IDLE, PE_COLOR_EXEC, PE_COLOR_FP_ARITH, PE_COLOR_FP_FUSED, PE_COLOR_INT_ARITH, PE_COLOR_CTRL, PE_COLOR_TASK, PE_COLOR_MEM_READ, PE_COLOR_MEM_WRITE, PE_COLOR_NOP,
   PE_STALL_TEXT_NOP, PE_STALL_TEXT_WAVELET, PE_STALL_TEXT_PIPE, PE_SELECT_COLOR,
   PE_TEXT_DEFAULT, PE_TEXT_DEFAULT_SUB, PE_TEXT_CTRL, PE_TEXT_CTRL_SUB, PE_TEXT_TASK, PE_TEXT_TASK_SUB,
   DEMO_PE_ON_DURATION, DEMO_PE_BRIGHTEN_DURATION, DEMO_PE_DIM_DURATION,
@@ -8,8 +8,9 @@ import {
 import { TraceParser } from "./trace-parser.js";
 
 // Operation categories for PE color-coding:
-//   "fp-arith"  = floating-point compute (green)
-//   "int-arith" = integer/fixed-point compute (yellow-green)
+//   "fp-arith"       = floating-point compute (green)
+//   "fp-fused-arith" = fused FP: MAC, dot product — 2 FLOPs/cycle (darker green)
+//   "int-arith"      = integer/fixed-point compute (yellow-green)
 //   "ctrl"      = control flow: comparisons, jumps (light yellow)
 //   "task"      = task management: activate, block, yield (grey)
 //   "mem-read"  = memory read: loads (steel blue)
@@ -21,10 +22,10 @@ const SYMBOLIC_OPS = {
   FADDE:  { symbol: "+", sub: "F32", cat: "fp-arith" },
   FMULS:  { symbol: "\u00d7", sub: "F32", cat: "fp-arith" },
   FSUBS:  { symbol: "\u2212", sub: "F32", cat: "fp-arith" },
-  FMACS:  { symbol: "\u00d7+", sub: "F32", cat: "fp-arith" },
-  FMSS:   { symbol: "\u00d7\u2212", sub: "F32", cat: "fp-arith" },
-  FMSES:  { symbol: "\u00d7\u2212", sub: "F32", cat: "fp-arith" },
-  FDPS:   { symbol: "\u22c5", sub: "F32", cat: "fp-arith" },
+  FMACS:  { symbol: "\u00d7+", sub: "F32", cat: "fp-fused-arith" },
+  FMSS:   { symbol: "\u00d7\u2212", sub: "F32", cat: "fp-fused-arith" },
+  FMSES:  { symbol: "\u00d7\u2212", sub: "F32", cat: "fp-fused-arith" },
+  FDPS:   { symbol: "\u22c5", sub: "F32", cat: "fp-fused-arith" },
   FMOV32: { symbol: "MOV", sub: "F32" },
   FMOVS:  { symbol: "MOV", sub: "F32" },
   FSTDPAS:{ symbol: "ST", sub: "F32", cat: "mem-write" },
@@ -45,10 +46,10 @@ const SYMBOLIC_OPS = {
   FUNS:   { symbol: "NaN", sub: "F32", cat: "ctrl" },
   FMULE:  { symbol: "\u00d7", sub: "F32", cat: "fp-arith" },
   FSUBE:  { symbol: "\u2212", sub: "F32", cat: "fp-arith" },
-  FMACE:  { symbol: "\u00d7+", sub: "F32", cat: "fp-arith" },
-  FMACES: { symbol: "\u00d7+", sub: "F32", cat: "fp-arith" },
-  FMSE:   { symbol: "\u00d7\u2212", sub: "F32", cat: "fp-arith" },
-  FDPE:   { symbol: "\u22c5", sub: "F32", cat: "fp-arith" },
+  FMACE:  { symbol: "\u00d7+", sub: "F32", cat: "fp-fused-arith" },
+  FMACES: { symbol: "\u00d7+", sub: "F32", cat: "fp-fused-arith" },
+  FMSE:   { symbol: "\u00d7\u2212", sub: "F32", cat: "fp-fused-arith" },
+  FDPE:   { symbol: "\u22c5", sub: "F32", cat: "fp-fused-arith" },
   FSQRS:  { symbol: "\u00d7", sub: "F32", cat: "fp-arith" },
   FSQRE:  { symbol: "\u00d7", sub: "F32", cat: "fp-arith" },
   FSSQRS: { symbol: "\u22c5", sub: "F32", cat: "fp-arith" },
@@ -62,11 +63,11 @@ const SYMBOLIC_OPS = {
   FADDH:  { symbol: "+", sub: "F16", cat: "fp-arith" },
   FMULH:  { symbol: "\u00d7", sub: "F16", cat: "fp-arith" },
   FSUBH:  { symbol: "\u2212", sub: "F16", cat: "fp-arith" },
-  FMACH:  { symbol: "\u00d7+", sub: "F16", cat: "fp-arith" },
-  FMACHS: { symbol: "\u00d7+", sub: "F16", cat: "fp-arith" },
-  FMSH:   { symbol: "\u00d7\u2212", sub: "F16", cat: "fp-arith" },
-  FMSHS:  { symbol: "\u00d7\u2212", sub: "F16", cat: "fp-arith" },
-  FDPH:   { symbol: "\u22c5", sub: "F16", cat: "fp-arith" },
+  FMACH:  { symbol: "\u00d7+", sub: "F16", cat: "fp-fused-arith" },
+  FMACHS: { symbol: "\u00d7+", sub: "F16", cat: "fp-fused-arith" },
+  FMSH:   { symbol: "\u00d7\u2212", sub: "F16", cat: "fp-fused-arith" },
+  FMSHS:  { symbol: "\u00d7\u2212", sub: "F16", cat: "fp-fused-arith" },
+  FDPH:   { symbol: "\u22c5", sub: "F16", cat: "fp-fused-arith" },
   FSQRH:  { symbol: "\u00d7", sub: "F16", cat: "fp-arith" },
   FSSQRH: { symbol: "\u22c5", sub: "F16", cat: "fp-arith" },
   FSCALEH:{ symbol: "SCALE", sub: "F16", cat: "fp-arith" },
@@ -249,6 +250,7 @@ const SYMBOLIC_OPS = {
 // Category → PE tile fill color (pre-computed to avoid per-frame branching)
 const CAT_FILL_COLOR = {
   "fp-arith": PE_COLOR_FP_ARITH,
+  "fp-fused-arith": PE_COLOR_FP_FUSED,
   "int-arith": PE_COLOR_INT_ARITH,
   "ctrl": PE_COLOR_CTRL,
   "task": PE_COLOR_TASK,

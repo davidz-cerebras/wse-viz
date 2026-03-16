@@ -204,13 +204,26 @@ export class Grid {
     const v = this.viewport;
     const minR = v ? v.minRow : 0, maxR = v ? v.maxRow : this.rows - 1;
     const minC = v ? v.minCol : 0, maxC = v ? v.maxCol : this.cols - 1;
+    const cols = this.cols;
 
+    // Layer 1: idle/stalled PEs (behind inactive ramps)
     for (let row = minR; row <= maxR; row++) {
       for (let col = minC; col <= maxC; col++) {
-        this.pes[row * this.cols + col].draw(ctx);
+        const pe = this.pes[row * cols + col];
+        if (!pe.op) pe.draw(ctx);
       }
     }
-    if (this.showRamps) this.drawRamps(ctx, minR, maxR, minC, maxC);
+    // Layer 2: inactive ramps
+    if (this.showRamps) this._drawInactiveRamps(ctx, minR, maxR, minC, maxC);
+    // Layer 3: active/executing PEs (over inactive ramps)
+    for (let row = minR; row <= maxR; row++) {
+      for (let col = minC; col <= maxC; col++) {
+        const pe = this.pes[row * cols + col];
+        if (pe.op) pe.draw(ctx);
+      }
+    }
+    // Layer 4: active ramps (over everything)
+    if (this.showRamps) this._drawActiveRamps(ctx);
     for (const packet of this.packets) packet.draw(ctx, now, this);
     this._drawCornerLabels(ctx, minR, maxR, minC, maxC);
 
@@ -250,19 +263,17 @@ export class Grid {
     this._staticRampPaths = { offPath, onPath };
   }
 
-  drawRamps(ctx, minR, maxR, minC, maxC) {
-    // Build static paths once per viewport
+  _drawInactiveRamps(ctx, minR, maxR, minC, maxC) {
     if (!this._staticRampPaths) this._buildStaticRampPaths(minR, maxR, minC, maxC);
-
-    // Draw all ramps in inactive style first
     ctx.fillStyle = RAMP_OFF_INACTIVE;
     ctx.fill(this._staticRampPaths.offPath);
     ctx.fillStyle = RAMP_ON_INACTIVE;
     ctx.fill(this._staticRampPaths.onPath);
+  }
 
+  _drawActiveRamps(ctx) {
     if (this.packets.length === 0) return;
 
-    // Overlay active ramps (only the few that are currently active)
     const cols = this.cols;
     const rows = this.rows;
     const pes = this.pes;
@@ -280,10 +291,6 @@ export class Grid {
       const dimY = pkt.dimY;
 
       if (depCycle !== null && fc < depCycle) {
-        // Wavelet is at current PE waiting for departure.
-        // Design intent: the destination off-ramp lights up at the start of
-        // the departure cycle, while the packet is still visually at the
-        // on-ramp. This previews the wavelet's intended next direction.
         if (cur.arriveDir && cur.arriveDir !== "R")
           hasOn = _addActiveRamp(onActive, cur.x, cur.y, dimY, cur.arriveDir, true, rows, cols, pes) || hasOn;
         if (cur.departDir)

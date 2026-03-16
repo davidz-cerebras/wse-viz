@@ -17,7 +17,7 @@ import { setOpBitmapScale, setCatEnabled } from "./pe.js";
 import { setLabelBitmapScale } from "./draw-utils.js";
 import {
   CELL_SIZE, GAP_SIZE,
-  PE_COLOR_FP_ARITH, PE_COLOR_INT_ARITH, PE_COLOR_CTRL,
+  PE_COLOR_FP_ARITH, PE_COLOR_FP_FUSED, PE_COLOR_INT_ARITH, PE_COLOR_CTRL,
   PE_COLOR_TASK, PE_COLOR_MEM_READ, PE_COLOR_MEM_WRITE,
 } from "./constants.js";
 
@@ -146,6 +146,7 @@ function setupEventListeners() {
   // Category coloring checkboxes — also set swatch colors from constants
   const catCheckboxes = [
     ["colorFpArith", "fp-arith", PE_COLOR_FP_ARITH],
+    ["colorFpFused", "fp-fused-arith", PE_COLOR_FP_FUSED],
     ["colorIntArith", "int-arith", PE_COLOR_INT_ARITH],
     ["colorCtrl", "ctrl", PE_COLOR_CTRL],
     ["colorTask", "task", PE_COLOR_TASK],

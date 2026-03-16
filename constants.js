@@ -21,8 +21,9 @@ export const PACKET_COLOR_LABEL_CTRL = "rgba(120, 50, 80, 0.9)";
 // PE tile colors
 export const PE_COLOR_IDLE = "rgba(45, 58, 90, 0.3)";          // dark blue
 export const PE_COLOR_EXEC = "rgb(100, 181, 246)";             // bright blue
-export const PE_COLOR_FP_ARITH = "rgb(50, 185, 75)";           // deep green
-export const PE_COLOR_INT_ARITH = "rgb(150, 220, 50)";         // yellow-green
+export const PE_COLOR_FP_ARITH = "rgb(50, 200, 75)";           // deep green
+export const PE_COLOR_FP_FUSED = "rgb(0, 100, 0)";           // darker green (2 FLOPs/cycle)
+export const PE_COLOR_INT_ARITH = "rgb(190, 200, 100)";         // yellow-green
 export const PE_COLOR_CTRL = "rgb(240, 240, 170)";             // cool light yellow
 export const PE_COLOR_TASK = "rgb(180, 180, 190)";             // light grey
 export const PE_COLOR_MEM_READ = "rgb(230, 140, 190)";          // pink-lavender
@@ -46,9 +47,9 @@ export const PE_STALL_TEXT_PIPE = "rgba(230, 200, 150, 0.7)"; // light orange la
 // Grid overlay colors
 export const ZOOM_PREVIEW_COLOR = "rgba(255, 152, 0, 0.3)";
 export const CORNER_LABEL_COLOR = "rgba(180, 190, 210, 0.6)";
-export const RAMP_ON_ACTIVE = "rgba(100, 181, 246, 0.9)";
+export const RAMP_ON_ACTIVE = "rgb(100, 181, 246)";
 export const RAMP_ON_INACTIVE = "rgba(100, 181, 246, 0.15)";
-export const RAMP_OFF_ACTIVE = "rgba(255, 152, 0, 0.9)";
+export const RAMP_OFF_ACTIVE = "rgb(255, 152, 0)";
 export const RAMP_OFF_INACTIVE = "rgba(255, 152, 0, 0.15)";
 
 // Demo timing (used by pe.js, packet.js, and demo.js)
