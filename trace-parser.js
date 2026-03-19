@@ -91,8 +91,7 @@ function parseWavelet(line) {
     landingEncoded: LANDING_ENCODE[m[7]], // encode immediately to avoid JSC rope retention
     departingEncoded,
     lf: line.includes(", lf=1"),
-    consumed: line.includes("to_ce_from_q") || line.includes("to_ce_from_router") ||
-      (m[7] !== "-" && departingEncoded === 0 && !line.includes("no_ce")),
+    consumed: line.includes("to_ce_from_q") || line.includes("to_ce_from_router"),
   };
 }
 
@@ -135,7 +134,8 @@ function classifyPipeStall(msg) {
   const dsrMatch = msg.match(/^dependent ((?:S[01]|D)DS\d+)/);
   if (dsrMatch) return { label: flatStr(dsrMatch[1]) };
 
-  return null;
+  // Unknown stall type — show the raw message
+  return { label: flatStr(msg) };
 }
 
 function parsePipeStall(line) {
@@ -143,7 +143,6 @@ function parsePipeStall(line) {
   const m = line.match(pipeStallRegex);
   if (!m) return null;
   const info = classifyPipeStall(m[4]);
-  if (!info) return null;
   return {
     cycle: parseInt(m[1]),
     x: parseInt(m[2]),
@@ -201,6 +200,7 @@ function _buildCASMOperands(isAfter) {
   // Show Imm when it carries independent information (not already in an addr/imm operand)
   if (imm && !src0?.startsWith("addr") && !src0?.startsWith("imm(") &&
              !src1?.startsWith("addr") && !src1?.startsWith("imm(") &&
+             !src2?.startsWith("addr") && !src2?.startsWith("imm(") &&
              !dest?.startsWith("addr") && !dest?.startsWith("imm(")) {
     srcs.push(`0x${imm}`);
   }
@@ -368,7 +368,7 @@ export class TraceParser {
           const op = om ? om[2] : null;
           // Extract PC from "^ 0xHHHH: Tnn ..."
           const pcEnd = after.indexOf(":", 2);
-          const pc = pcEnd > 4 ? parseInt(after.substring(4, pcEnd), 16) : 0;
+          const pc = pcEnd > 4 ? parseInt(after.substring(4, pcEnd), 16) : 0xFFFF;
           const exState = `1:${pc}:${pred || ""}:${op || ""}`;
           if (prevExState.get(key) !== exState) {
             prevExState.set(key, exState);
@@ -907,16 +907,6 @@ export class TraceParser {
     return found;
   }
 
-  /**
-   * Find the range of potentially-live wavelets at a given cycle.
-   * Returns { lowerBound, upperBound } indices into waveletList, or null.
-   * Uses two binary searches: upper bound on firstCycle, lower bound on prefMaxLastCycle.
-   * The range may include some dead wavelets (filtered by the caller via lastCycle check).
-   */
-  /**
-   * Sort a wavelet list by firstCycle and compute the prefix-max of lastCycle
-   * for binary-search-based live-range queries. Returns { waveletList, wavPrefMaxLastCycle }.
-   */
   /** Build a Uint8Array marking which opcode IDs are NOPs. */
   static buildNopLookup(opLookup) {
     const nops = new Uint8Array(opLookup.length);
@@ -927,6 +917,10 @@ export class TraceParser {
     return nops;
   }
 
+  /**
+   * Sort a wavelet list by firstCycle and compute the prefix-max of lastCycle
+   * for binary-search-based live-range queries. Returns { waveletList, wavPrefMaxLastCycle }.
+   */
   static prepareWaveletList(wavelets) {
     for (const wv of wavelets) {
       wv.firstCycle = wv.hops.cycles[0];
@@ -942,6 +936,12 @@ export class TraceParser {
     return { waveletList: wavelets, wavPrefMaxLastCycle: prefMax };
   }
 
+  /**
+   * Find the range of potentially-live wavelets at a given cycle.
+   * Returns { lowerBound, upperBound } indices into waveletList, or null.
+   * Uses two binary searches: upper bound on firstCycle, lower bound on prefMaxLastCycle.
+   * The range may include some dead wavelets (filtered by the caller via lastCycle check).
+   */
   static findLiveWaveletRange(waveletList, prefMaxLastCycle, cycle) {
     if (!waveletList) return null;
     const wvLen = waveletList.length;

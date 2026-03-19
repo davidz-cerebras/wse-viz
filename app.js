@@ -185,8 +185,13 @@ function setupEventListeners() {
   els.fwdPlayBtn.addEventListener("click", transportFwdPlay);
   document.getElementById("speedDown").addEventListener("click", () => adjustSpeed(0.5));
   document.getElementById("speedUp").addEventListener("click", () => adjustSpeed(2));
+  // Blur the scrub bar after mouse interaction so it doesn't capture keyboard events
+  els.scrubBar.addEventListener("change", () => els.scrubBar.blur());
+  els.scrubBar.addEventListener("mouseup", () => els.scrubBar.blur());
+
   document.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+    if (e.target.tagName === "TEXTAREA") return;
+    if (e.target.tagName === "INPUT" && e.target !== els.scrubBar) return;
     if (e.code === "Space") {
       e.preventDefault();
       if (!getIsScrubbing()) transportPause();

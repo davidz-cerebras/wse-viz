@@ -14,6 +14,17 @@
   --color-text-secondary: #b0b8d4;
   --color-highlight: #ff9800;
   --color-prefetch: #3a6a8a;
+  --color-error: #ff6b6b;
+  --color-success: #4caf50;
+  --color-success-light: #5cb860;
+  --color-purple: #9c27b0;
+  --color-purple-light: #ab47bc;
+  --color-orange-dark: #f57c00;
+  --color-orange-light: #ffa726;
+  --color-trace-exec: #81c784;
+  --color-trace-idle: #78909c;
+  --color-trace-stall: #ef5350;
+  --color-trace-pred: #ce93d8;
   --font-mono: "Monaco", "Menlo", "Ubuntu Mono", monospace;
 }
 
@@ -58,7 +69,7 @@ header .header-left {
 header h1 {
   font-size: 1.5rem;
   font-weight: 600;
-  background: linear-gradient(90deg, var(--color-accent), #42a5f5);
+  background: linear-gradient(90deg, var(--color-accent), var(--color-accent));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -67,7 +78,7 @@ header h1 {
 .server-status {
   font-size: 0.85rem;
   font-weight: 500;
-  color: #ff6b6b;
+  color: var(--color-error);
   white-space: nowrap;
 }
 
@@ -198,11 +209,11 @@ header h1 {
 }
 
 #startBtn {
-  background: linear-gradient(135deg, #4caf50, #45a049);
+  background: linear-gradient(135deg, var(--color-success), var(--color-success));
 }
 
 #startBtn:hover {
-  background: linear-gradient(135deg, #5cb860, #4caf50);
+  background: linear-gradient(135deg, var(--color-success-light), var(--color-success));
 }
 
 .controls-separator {
@@ -211,11 +222,11 @@ header h1 {
 }
 
 .file-input-label {
-  background: linear-gradient(135deg, var(--color-highlight), #f57c00);
+  background: linear-gradient(135deg, var(--color-highlight), var(--color-orange-dark));
 }
 
 .file-input-label:hover {
-  background: linear-gradient(135deg, #ffa726, var(--color-highlight));
+  background: linear-gradient(135deg, var(--color-orange-light), var(--color-highlight));
 }
 
 .cycle-display {
@@ -227,11 +238,11 @@ header h1 {
 }
 
 #cgBtn {
-  background: linear-gradient(135deg, #9c27b0, #7b1fa2);
+  background: linear-gradient(135deg, var(--color-purple), var(--color-purple));
 }
 
 #cgBtn:hover {
-  background: linear-gradient(135deg, #ab47bc, #9c27b0);
+  background: linear-gradient(135deg, var(--color-purple-light), var(--color-purple));
 }
 
 main {
@@ -491,15 +502,15 @@ canvas {
 }
 
 .trace-exec {
-  color: #81c784;
+  color: var(--color-trace-exec);
 }
 
 .trace-idle {
-  color: #78909c;
+  color: var(--color-trace-idle);
 }
 
 .trace-stall {
-  color: #ef5350;
+  color: var(--color-trace-stall);
 }
 
 .trace-pipe-stage {
@@ -508,7 +519,7 @@ canvas {
 }
 
 .trace-pred {
-  color: #ce93d8;
+  color: var(--color-trace-pred);
   font-style: italic;
 }
 
@@ -540,12 +551,12 @@ canvas {
 }
 
 .code-pred {
-  color: #ce93d8;
+  color: var(--color-trace-pred);
   font-style: italic;
 }
 
 .code-op {
-  color: #81c784;
+  color: var(--color-trace-exec);
 }
 
 #codeLog {

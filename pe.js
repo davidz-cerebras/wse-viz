@@ -1,6 +1,7 @@
 import {
   CELL_SIZE,
-  PE_COLOR_IDLE, PE_COLOR_EXEC, PE_COLOR_FP_ARITH, PE_COLOR_FP_FUSED, PE_COLOR_INT_ARITH, PE_COLOR_CTRL, PE_COLOR_TASK, PE_COLOR_MEM_READ, PE_COLOR_MEM_WRITE, PE_COLOR_NOP,
+  PE_COLOR_IDLE, PE_COLOR_EXEC, PE_COLOR_FP_ARITH, PE_COLOR_FP_FUSED, PE_COLOR_INT_ARITH, PE_COLOR_CTRL, PE_COLOR_TASK, PE_COLOR_MEM_READ, PE_COLOR_MEM_WRITE,
+  PE_COLOR_NOP, PE_COLOR_STALL_WAVELET, PE_COLOR_STALL_PIPE,
   PE_STALL_TEXT_NOP, PE_STALL_TEXT_WAVELET, PE_STALL_TEXT_PIPE, PE_SELECT_COLOR,
   PE_TEXT_DEFAULT, PE_TEXT_DEFAULT_SUB, PE_TEXT_CTRL, PE_TEXT_CTRL_SUB, PE_TEXT_TASK, PE_TEXT_TASK_SUB,
   DEMO_PE_ON_DURATION, DEMO_PE_BRIGHTEN_DURATION, DEMO_PE_DIM_DURATION,
@@ -258,6 +259,10 @@ const CAT_FILL_COLOR = {
   "mem-write": PE_COLOR_MEM_WRITE,
 };
 
+// Stall type → color lookups (shared with grid.js to avoid duplication)
+export const STALL_FILL_COLOR = { nop: PE_COLOR_NOP, wavelet: PE_COLOR_STALL_WAVELET, pipeline: PE_COLOR_STALL_PIPE };
+export const STALL_TEXT_COLOR = { nop: PE_STALL_TEXT_NOP, wavelet: PE_STALL_TEXT_WAVELET, pipeline: PE_STALL_TEXT_PIPE };
+
 // Set of disabled categories — entries with a disabled cat use PE_COLOR_EXEC.
 const _disabledCats = new Set();
 
@@ -404,7 +409,7 @@ export class PE {
     // draw() renders the op symbol in blue. Stall coloring and stall reason
     // labels only appear when the PE is stalled with nothing executing
     // (`!this.op`), which is the more performance-critical case to highlight.
-    this.stall = null; // null, "wavelet", or "pipeline"
+    this.stall = null; // null, "nop", "wavelet", or "pipeline"
     this.stallReason = null; // compact label: "C6", "A0", "R3", "MEM", "S1DS0"
     this.fillColor = PE_COLOR_IDLE;
   }
@@ -465,7 +470,7 @@ export class PE {
     if (!this.op && this.stallReason) {
       const fontSize = Math.min(FONT_SIZE_MAX_LABEL, FONT_SIZE_SCALE_LABEL / Math.max(1, this.stallReason.length));
       ctx.font = `${fontSize}px monospace`;
-      ctx.fillStyle = this.stall === "nop" ? PE_STALL_TEXT_NOP : this.stall === "wavelet" ? PE_STALL_TEXT_WAVELET : PE_STALL_TEXT_PIPE;
+      ctx.fillStyle = STALL_TEXT_COLOR[this.stall];
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(this.stallReason, this.cx, this.cy);

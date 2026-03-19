@@ -5,8 +5,10 @@ import { openSync, readSync, statSync, closeSync } from "node:fs";
 
 export class NodeFile {
   constructor(filePath) {
-    this._fd = openSync(filePath, "r");
-    this.size = statSync(filePath).size;
+    const fd = openSync(filePath, "r");
+    try { this.size = statSync(filePath).size; }
+    catch (e) { closeSync(fd); throw e; }
+    this._fd = fd;
   }
 
   slice(start, end) {

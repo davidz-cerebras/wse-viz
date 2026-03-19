@@ -1,6 +1,6 @@
 // Demo-only constants, algorithms, and UI glue.
 
-import { CELL_SIZE, DEMO_HOP_DELAY, DEMO_STEP_DELAY } from "./constants.js";
+import { DEMO_HOP_DELAY, DEMO_STEP_DELAY } from "./constants.js";
 import { drawPacketDot } from "./draw-utils.js";
 
 let grid, els, animationLoop, cancelReplay, showPanel, setGrid;
@@ -54,15 +54,14 @@ class MultiHopPacket {
 
   getCurrentPosition(currentTime, grid) {
     const elapsed = currentTime - this.startTime;
-    const half = CELL_SIZE / 2;
     if (elapsed <= 0 || this.path.length === 0) {
       const pe = grid.getPE(this.fromRow, this.fromCol);
-      if (pe) return { x: pe.x + half, y: pe.y + half };
+      if (pe) return { x: pe.cx, y: pe.cy };
       return null;
     }
     if (elapsed >= this.path.length * DEMO_HOP_DELAY) {
       const pe = grid.getPE(this.toRow, this.toCol);
-      if (pe) return { x: pe.x + half, y: pe.y + half };
+      if (pe) return { x: pe.cx, y: pe.cy };
       return null;
     }
 
@@ -77,8 +76,8 @@ class MultiHopPacket {
     if (!prev || !next) return null;
 
     return {
-      x: prev.x + half + (next.x - prev.x) * hopProgress,
-      y: prev.y + half + (next.y - prev.y) * hopProgress,
+      x: prev.cx + (next.cx - prev.cx) * hopProgress,
+      y: prev.cy + (next.cy - prev.cy) * hopProgress,
     };
   }
 

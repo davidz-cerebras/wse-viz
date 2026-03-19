@@ -66,8 +66,16 @@ if (nodeFile.size < PARALLEL_THRESHOLD) {
 
   const segments = await new Promise((resolve, reject) => {
     const results = new Array(numWorkers).fill(null);
+    const workers = [];
     let completed = 0;
     let error = null;
+
+    function fail(err) {
+      if (error) return;
+      error = err;
+      for (const w of workers) w.terminate();
+      reject(err);
+    }
 
     for (let i = 0; i < numWorkers; i++) {
       const startByte = Math.floor(nodeFile.size * i / numWorkers);
@@ -75,9 +83,12 @@ if (nodeFile.size < PARALLEL_THRESHOLD) {
       const w = new Worker(segWorkerPath, {
         workerData: { filePath: traceFile, startByte, endByte, isFirst: i === 0, segmentIndex: i },
       });
+      workers.push(w);
 
-      w.on("error", (err) => {
-        if (!error) { error = err; reject(err); }
+      w.on("error", (err) => fail(err));
+
+      w.on("exit", (code) => {
+        if (code !== 0 && !error) fail(new Error(`Segment worker exited with code ${code}`));
       });
 
       w.on("message", (msg) => {
@@ -85,6 +96,8 @@ if (nodeFile.size < PARALLEL_THRESHOLD) {
           segProgress[msg.segmentIndex] = msg.pct;
           const overall = segProgress.reduce((a, b) => a + b, 0) / numWorkers;
           statusLine(`${overall.toFixed(1)}%`);
+        } else if (msg.type === "error") {
+          fail(new Error(msg.message || "segment parse error"));
         } else if (msg.type === "done") {
           results[msg.segmentIndex] = msg.result;
           completed++;
@@ -179,20 +192,22 @@ function handleState(cycle) {
 
   // Wavelet reconstruction
   const wavelets = [];
-  const wvRange = TraceParser.findLiveWaveletRange(td.waveletList, td.wavPrefMaxLastCycle, cycle);
+  // cycle - 1: consumed wavelets linger one cycle past their last hop,
+  // so we widen the binary search to include wavelets that ended one cycle ago.
+  const wvRange = TraceParser.findLiveWaveletRange(td.waveletList, td.wavPrefMaxLastCycle, cycle - 1);
   if (wvRange) {
     const wvList = td.waveletList;
     for (let wi = wvRange.lowerBound; wi < wvRange.upperBound; wi++) {
       const wv = wvList[wi];
-      if (wv.lastCycle < cycle) continue;
+      if (wv.lastCycle + 1 < cycle) continue;
       const branches = getBranches(wv);
       for (const waypoints of branches) {
-        const branchEnd = waypoints[waypoints.length - 1].cycle;
-        if (branchEnd < cycle) continue;
+        const lastWp = waypoints[waypoints.length - 1];
+        if ((lastWp.lingerUntil || lastWp.cycle) < cycle) continue;
         // Serialize waypoints as compact tuples
         const wps = [];
         for (const wp of waypoints) {
-          wps.push([wp.cycle, wp.x, wp.y, wp.arriveDir, wp.departDir, wp.depCycle]);
+          wps.push([wp.cycle, wp.x, wp.y, wp.arriveDir, wp.departDir, wp.depCycle, wp.consumed || false, wp.lingerUntil || 0]);
         }
         wavelets.push([wv.color, wv.ctrl, wv.lf, wps]);
       }

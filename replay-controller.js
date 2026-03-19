@@ -23,6 +23,7 @@ let maxCycleStr = ""; // cached String(maxCycle) for updateScrubUI
 let activeTraceTab = "pipeline"; // "pipeline" or "code"
 let codeViewData = null; // cached /api/pe-memory response or local pcIndex data
 let _lastCodeScrolled = null; // dedup scrollIntoView for code tab
+let _codeViewAbort = null; // AbortController for in-flight /api/pe-memory fetch
 
 
 // Server mode state
@@ -168,16 +169,20 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
   //     so binary-searchable). Everything before this index is guaranteed dead.
   //     Some dead wavelets after the lower bound may be included but are filtered
   //     by the per-wavelet lastCycle check in the loop.
-  const wvRange = TraceParser.findLiveWaveletRange(td.waveletList, td.wavPrefMaxLastCycle, targetCycle);
+  // targetCycle - 1: consumed wavelets linger one cycle past their last hop,
+  // so we widen the binary search to include wavelets that ended one cycle ago.
+  const wvRange = TraceParser.findLiveWaveletRange(td.waveletList, td.wavPrefMaxLastCycle, targetCycle - 1);
   if (wvRange) {
     const wvList = td.waveletList;
     for (let wi = wvRange.lowerBound; wi < wvRange.upperBound; wi++) {
       const wv = wvList[wi];
-      if (wv.lastCycle < targetCycle) continue;
+      // +1: consumed wavelets linger one cycle past their last hop for the
+      // ramp-to-center animation, so we must include them at lastCycle + 1.
+      if (wv.lastCycle + 1 < targetCycle) continue;
       const branches = getBranches(wv);
       for (const waypoints of branches) {
-        const branchEnd = waypoints[waypoints.length - 1].cycle;
-        if (branchEnd < targetCycle) continue;
+        const lastBranchWp = waypoints[waypoints.length - 1];
+        if ((lastBranchWp.lingerUntil || lastBranchWp.cycle) < targetCycle) continue;
         const pkt = new TracedPacket(waypoints, td.dimY, wv.color, wv.ctrl, wv.lf);
         pkt.syncTo(targetCycle, targetCycle);
         grid.packets.push(pkt);
@@ -307,22 +312,11 @@ function renderPETraceWindow(centerCycle) {
 }
 
 /** Extend the rendered window by appending/prepending entries without replacing. */
-let _traceEntryHeight = 0; // cached height of one trace entry (all are identical)
-
-function _getEntryHeight() {
-  // Always re-measure — a single offsetHeight read is cheap (one reflow),
-  // and this ensures correctness after browser zoom/resize/DPI changes.
-  const first = els.traceLog.firstChild;
-  if (first) _traceEntryHeight = first.offsetHeight;
-  return _traceEntryHeight || 18; // fallback
-}
-
 function _extendTraceWindow(direction) {
   if (!selectedPE) return;
   const { totalCycles } = selectedPE;
   const log = els.traceLog;
   const CHUNK = Math.floor(PE_TRACE_WINDOW / 4);
-  const rowH = _getEntryHeight();
 
   if (direction > 0) {
     // Append at bottom, remove from top
@@ -341,13 +335,19 @@ function _extendTraceWindow(direction) {
     const excess = peTraceWindowSize - PE_TRACE_WINDOW;
     if (excess > 0) {
       const scrollBefore = log.scrollTop;
+      // Measure actual height of entries being removed to avoid sub-pixel drift
+      let removedHeight = 0;
+      for (let j = 0; j < excess; j++) {
+        const child = log.children[j];
+        if (child) removedHeight += child.offsetHeight;
+      }
       for (let j = 0; j < excess; j++) {
         if (!log.firstChild) break;
         log.firstChild.remove();
       }
       peTraceWindowStart += excess;
       peTraceWindowSize -= excess;
-      log.scrollTop = scrollBefore - excess * rowH;
+      log.scrollTop = scrollBefore - removedHeight;
     }
   } else {
     // Prepend at top, remove from bottom
@@ -355,13 +355,19 @@ function _extendTraceWindow(direction) {
     const addCount = peTraceWindowStart - newStart;
     if (addCount <= 0) return;
 
-    const scrollBefore = log.scrollTop;
     const frag = document.createDocumentFragment();
     for (let i = newStart; i < peTraceWindowStart; i++) {
       frag.appendChild(_buildTraceEntry(i));
     }
+    // Measure actual height of prepended entries after insertion
     log.prepend(frag);
-    log.scrollTop = scrollBefore + addCount * rowH;
+    let addedHeight = 0;
+    for (let j = 0; j < addCount; j++) {
+      const child = log.children[j];
+      if (child) addedHeight += child.offsetHeight;
+    }
+    const scrollBefore = log.scrollTop;
+    log.scrollTop = scrollBefore + addedHeight;
 
     peTraceWindowStart = newStart;
     peTraceWindowSize += addCount;
@@ -394,16 +400,19 @@ function switchTraceTab(tab) {
 function loadCodeView(traceX, traceY) {
   if (serverMode) {
     const gen = peSelectGeneration;
+    if (_codeViewAbort) _codeViewAbort.abort();
+    _codeViewAbort = new AbortController();
     els.codeLog.innerHTML = "<div style='color: var(--color-text-muted); padding: 0.5rem;'>Loading...</div>";
-    fetch(`/api/pe-memory?x=${traceX}&y=${traceY}`)
+    fetch(`/api/pe-memory?x=${traceX}&y=${traceY}`, { signal: _codeViewAbort.signal })
       .then(r => r.json())
       .then(data => {
-        if (gen !== peSelectGeneration) return; // stale — user clicked another PE
+        if (gen !== peSelectGeneration) return;
         if (!data.found) { codeViewData = []; }
         else { codeViewData = data.instructions; }
         renderCodeView();
       })
       .catch(err => {
+        if (err.name === "AbortError") return;
         if (gen !== peSelectGeneration) return;
         console.error("[wse-viz] Code view load failed:", err);
         els.codeLog.innerHTML = "<div style='color: #ef5350; padding: 0.5rem;'>Failed to load</div>";
@@ -596,7 +605,6 @@ export function deselectPE() {
   selectedPE = null;
   peTraceWindowStart = 0;
   peTraceWindowSize = 0;
-  _traceEntryHeight = 0;
   _highlightedEntry = null;
   _lastScrolledEntry = null;
   els.traceLog.onscroll = null;
@@ -608,6 +616,7 @@ export function deselectPE() {
   // Reset code view data (but preserve activeTraceTab across PE switches)
   codeViewData = null;
   _lastCodeScrolled = null;
+  if (_codeViewAbort) { _codeViewAbort.abort(); _codeViewAbort = null; }
   els.codeLog.innerHTML = "";
 }
 
@@ -1036,10 +1045,12 @@ function applyServerState(data) {
   // Create TracedPackets from wavelet waypoints
   for (const wvData of data.wavelets) {
     const [color, ctrl, lf, branchTuples] = wvData;
-    const waypoints = branchTuples.map(t => ({
-      cycle: t[0], x: t[1], y: t[2],
-      arriveDir: t[3], departDir: t[4], depCycle: t[5],
-    }));
+    const waypoints = branchTuples.map(t => {
+      const wp = { cycle: t[0], x: t[1], y: t[2],
+        arriveDir: t[3], departDir: t[4], depCycle: t[5], consumed: !!t[6] };
+      if (t[7]) wp.lingerUntil = t[7];
+      return wp;
+    });
     const pkt = new TracedPacket(waypoints, td.dimY, color, ctrl, lf);
     pkt.syncTo(state.currentCycle, state.currentCycle);
     grid.packets.push(pkt);
@@ -1196,7 +1207,7 @@ export function handleTraceFile(event, setGrid) {
     worker.terminate(); activeWorker = null;
     if (myGen !== handleTraceGeneration) return;
     els.loadingBar.classList.add("hidden");
-    els.playbackControls.classList.remove("hidden");
+    els.playbackBar.classList.add("hidden");
     els.cycleDisplay.textContent = `Error: ${err.message || "worker failed to load"}`;
   };
 
@@ -1225,7 +1236,7 @@ export function handleTraceFile(event, setGrid) {
       worker.terminate(); activeWorker = null;
       if (myGen !== handleTraceGeneration) return;
       els.loadingBar.classList.add("hidden");
-      els.playbackControls.classList.remove("hidden");
+      els.playbackBar.classList.add("hidden");
       els.cycleDisplay.textContent = `Error: ${msg.message}`;
       return;
     case "done": {

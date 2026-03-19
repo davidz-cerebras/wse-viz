@@ -5,8 +5,7 @@ import { LANDING_DECODE, decodeDeparting } from "./trace-parser.js";
 // Direction → trace coordinate delta
 const DIR_DELTA = { E: [1, 0], W: [-1, 0], N: [0, -1], S: [0, 1] };
 
-// Direction → opposite (for computing arrival direction at destination)
-const DIR_OPPOSITE = { E: "W", W: "E", N: "S", S: "N" };
+
 
 /** Lazily extract and cache branches for a wavelet. */
 export function getBranches(wv) {
@@ -72,13 +71,11 @@ export function extractBranches(wavelet) {
     return null;
   }
 
-  function isConsumedWithDepartures(cycle, x, y) {
-    // Scan forward from arrival cycle for a hop that is both consumed and departing
+  function isConsumedAt(cycle, x, y) {
     const peHops = hopsByPE.get(`${x},${y}`) || [];
     for (const h of peHops) {
       if (h.cycle < cycle) continue;
-      if (h.consumed && h.departing.length > 0) return true;
-      // Stop if we've passed continuation hops (new landing = new wavelet visit)
+      if (h.consumed) return true;
       if (h.cycle > cycle && h.landing !== "-") break;
     }
     return false;
@@ -125,7 +122,7 @@ export function extractBranches(wavelet) {
             break; // no arrival pushed — skip remaining fork directions
           }
           visited.add(destKey);
-          const nextArriveDir = getLandingDir(nc, nx, ny) || DIR_OPPOSITE[dir];
+          const nextArriveDir = getLandingDir(nc, nx, ny);
           waypoints.push({ cycle: nc, x: nx, y: ny, arriveDir: nextArriveDir, departDir: null, depCycle: null });
           cx = nx; cy = ny; cc = nc;
           followed = true;
@@ -144,7 +141,7 @@ export function extractBranches(wavelet) {
           // the crossing animation (on-ramp → off-ramp) then terminates
           const destKey = `${nc},${nx},${ny}`;
           if (visited.has(destKey)) {
-            const nextArriveDir = getLandingDir(nc, nx, ny) || DIR_OPPOSITE[dir];
+            const nextArriveDir = getLandingDir(nc, nx, ny);
             branches.push([forkStart, {
               cycle: nc, x: nx, y: ny,
               arriveDir: nextArriveDir, departDir: null, depCycle: null,
@@ -153,7 +150,7 @@ export function extractBranches(wavelet) {
           }
           visited.add(destKey);
 
-          const nextArriveDir = getLandingDir(nc, nx, ny) || DIR_OPPOSITE[dir];
+          const nextArriveDir = getLandingDir(nc, nx, ny);
           const forkDest = {
             cycle: nc, x: nx, y: ny,
             arriveDir: nextArriveDir, departDir: null, depCycle: null,
@@ -168,13 +165,15 @@ export function extractBranches(wavelet) {
       // Check the arrival cycle at this PE (consumePeWp.cycle), not the departure cycle
       if (waypoints.length >= 2 && followed) {
         const arrivalCycle = waypoints[waypoints.length - 2].cycle;
-        if (isConsumedWithDepartures(arrivalCycle, fromX, fromY)) {
+        if (isConsumedAt(arrivalCycle, fromX, fromY)) {
           const consumePeWp = waypoints[waypoints.length - 2];
+          const consumeCycle = Math.max(consumePeWp.cycle, dep.depCycle - 1);
           branches.push([
             { cycle: consumePeWp.cycle, x: fromX, y: fromY,
               arriveDir: consumePeWp.arriveDir, departDir: null, depCycle: null },
-            { cycle: dep.depCycle + 1, x: fromX, y: fromY,
-              arriveDir: consumePeWp.arriveDir, departDir: null, depCycle: null },
+            { cycle: consumeCycle, x: fromX, y: fromY,
+              arriveDir: consumePeWp.arriveDir, departDir: null, depCycle: null,
+              consumed: true, lingerUntil: consumeCycle + 1 },
           ]);
         }
       }
@@ -183,6 +182,12 @@ export function extractBranches(wavelet) {
     }
 
     if (waypoints.length > 1) {
+      // Mark terminal waypoint as consumed if the wavelet is delivered to the CE
+      const lastWp = waypoints[waypoints.length - 1];
+      if (!lastWp.departDir && isConsumedAt(lastWp.cycle, lastWp.x, lastWp.y)) {
+        lastWp.consumed = true;
+        lastWp.lingerUntil = lastWp.cycle + 1;
+      }
       branches.push(waypoints);
     }
   }
@@ -265,7 +270,8 @@ export class TracedPacket {
     this.ctrl = ctrl;   // true = control wavelet, false = data wavelet
     this.lf = lf;       // true = last-in-flight
     this.startCycle = waypoints[0].cycle;
-    this.endCycle = waypoints[waypoints.length - 1].cycle;
+    const lastWp = waypoints[waypoints.length - 1];
+    this.endCycle = lastWp.lingerUntil || lastWp.cycle;
     this.fractionalCycle = this.startCycle;
     this.wpIdx = 0;     // cached waypoint index, updated by syncTo
     this.done = false;
@@ -274,8 +280,8 @@ export class TracedPacket {
 
   /** Update cycle state and fractional position in one call. */
   syncTo(cycle, fc) {
-    this.done = cycle > this.endCycle;
-    this.visible = cycle >= this.startCycle && !this.done;
+    this.done = fc > this.endCycle + 1;
+    this.visible = fc >= this.startCycle && !this.done;
     this.fractionalCycle = fc;
     // Update cached waypoint index, starting from previous position for
     // amortized O(1) during forward playback. Falls back to scanning
@@ -340,10 +346,26 @@ export class TracedPacket {
       };
     }
 
-    // Phase 3: Sitting at final destination on-ramp or off-ramp
+    // Phase 3: Final destination
     if (wp.departDir) {
       return offRampPos(grid, wp.x, wp.y, dimY, wp.departDir);
     }
+
+    // Consumed: animate from on-ramp into PE center over one cycle
+    if (wp.consumed) {
+      const from = onRampPos(grid, wp.x, wp.y, dimY, wp.arriveDir);
+      if (!from) return null;
+      const row = dimY - 1 - wp.y, col = wp.x;
+      const pe = grid.getPE(row, col);
+      if (!pe) return from;
+      const t = Math.min(fc - wp.cycle, 1);
+      if (t <= 0) return from;
+      return {
+        x: from.x + (pe.cx - from.x) * t,
+        y: from.y + (pe.cy - from.y) * t,
+      };
+    }
+
     return onRampPos(grid, wp.x, wp.y, dimY, wp.arriveDir);
   }
 
