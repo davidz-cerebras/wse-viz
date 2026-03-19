@@ -192,9 +192,7 @@ function handleState(cycle) {
 
   // Wavelet reconstruction
   const wavelets = [];
-  // cycle - 1: consumed wavelets linger one cycle past their last hop,
-  // so we widen the binary search to include wavelets that ended one cycle ago.
-  const wvRange = TraceParser.findLiveWaveletRange(td.waveletList, td.wavPrefMaxLastCycle, cycle - 1);
+  const wvRange = TraceParser.findLiveWaveletRange(td.waveletList, td.wavPrefMaxLastCycle, cycle, cycle - 1);
   if (wvRange) {
     const wvList = td.waveletList;
     for (let wi = wvRange.lowerBound; wi < wvRange.upperBound; wi++) {

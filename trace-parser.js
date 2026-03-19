@@ -942,8 +942,9 @@ export class TraceParser {
    * Uses two binary searches: upper bound on firstCycle, lower bound on prefMaxLastCycle.
    * The range may include some dead wavelets (filtered by the caller via lastCycle check).
    */
-  static findLiveWaveletRange(waveletList, prefMaxLastCycle, cycle) {
+  static findLiveWaveletRange(waveletList, prefMaxLastCycle, cycle, lowerCycle) {
     if (!waveletList) return null;
+    if (lowerCycle === undefined) lowerCycle = cycle;
     const wvLen = waveletList.length;
 
     // Upper bound: first index where firstCycle > cycle
@@ -956,11 +957,11 @@ export class TraceParser {
     const upperBound = lo;
     if (upperBound === 0) return null;
 
-    // Lower bound: first index where prefMaxLastCycle >= cycle
+    // Lower bound: first index where prefMaxLastCycle >= lowerCycle
     lo = 0; hi = upperBound;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
-      if (prefMaxLastCycle[mid] < cycle) lo = mid + 1;
+      if (prefMaxLastCycle[mid] < lowerCycle) lo = mid + 1;
       else hi = mid;
     }
     return { lowerBound: lo, upperBound };
