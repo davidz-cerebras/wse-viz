@@ -149,6 +149,7 @@ const traceData = {
   minCycle: raw.minCycle,
   maxCycle: raw.maxCycle,
   pcIndex: raw.pcIndex,
+  backpressureIndex: raw.backpressureIndex,
 };
 
 if (traceData.dimX === 0 || traceData.dimY === 0 || traceData.minCycle > traceData.maxCycle) {
@@ -201,18 +202,32 @@ function handleState(cycle) {
       const branches = getBranches(wv);
       for (const waypoints of branches) {
         const lastWp = waypoints[waypoints.length - 1];
-        if ((lastWp.lingerUntil || lastWp.cycle) < cycle) continue;
+        if ((lastWp.lingerUntil ?? lastWp.cycle) < cycle) continue;
         // Serialize waypoints as compact tuples
         const wps = [];
         for (const wp of waypoints) {
-          wps.push([wp.cycle, wp.x, wp.y, wp.arriveDir, wp.departDir, wp.depCycle, wp.consumed || false, wp.lingerUntil || 0]);
+          const linger = wp.lingerUntil >= 0xFFFFFFFF ? -1 : (wp.lingerUntil ?? 0);
+          const queued = wp.queuedUntil === Infinity ? -1 : (wp.queuedUntil ?? 0);
+          wps.push([wp.cycle, wp.x, wp.y, wp.arriveDir, wp.departDir, wp.depCycle, wp.consumed || false, linger, queued]);
         }
         wavelets.push([wv.color, wv.ctrl, wv.lf, wps]);
       }
     }
   }
 
-  return JSON.stringify({ cycle, pes, wavelets });
+  // Backpressure: per-PE direction bitmask (only include PEs with active backpressure)
+  const bps = [];
+  if (td.backpressureIndex) {
+    for (const [peKey] of td.backpressureIndex) {
+      const [x, y] = peKey.split(",").map(Number);
+      const bp = TraceParser.getBackpressure(td.backpressureIndex, x, y, cycle);
+      if (bp >= 0) {
+        bps.push([td.dimY - 1 - y, x, bp]);
+      }
+    }
+  }
+
+  return JSON.stringify({ cycle, pes, wavelets, bps });
 }
 
 // ---------------------------------------------------------------------------
@@ -277,20 +292,20 @@ const MIME = {
   ".svg": "image/svg+xml",
 };
 
+const staticCache = new Map();
 function serveStatic(res, urlPath) {
   const safePath = urlPath === "/" ? "/index.html" : urlPath;
   if (safePath.includes("..")) { res.writeHead(403); res.end(); return; }
   const filePath = join(installDir, safePath);
   const mime = MIME[extname(filePath).toLowerCase()];
   if (!mime) { res.writeHead(404); res.end("Not found"); return; }
-  try {
-    const data = readFileSync(filePath);
-    res.writeHead(200, { "Content-Type": mime });
-    res.end(data);
-  } catch {
-    res.writeHead(404);
-    res.end("Not found");
+  let data = staticCache.get(filePath);
+  if (!data) {
+    try { data = readFileSync(filePath); staticCache.set(filePath, data); }
+    catch { res.writeHead(404); res.end("Not found"); return; }
   }
+  res.writeHead(200, { "Content-Type": mime });
+  res.end(data);
 }
 
 // ---------------------------------------------------------------------------

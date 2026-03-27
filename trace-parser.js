@@ -7,6 +7,12 @@ const pipeStallRegex =
   /^@(\d+) P(\d+)\.(\d+):.*Pipe: (?:\d+), Msg: stall: (.+)/;
 const waveletRegex =
   /^@(\d+) P(\d+)\.(\d+) \(\w+\) wavelet C(\d+) ctrl=(\d), idx=(?:[0-9a-fA-F]+), data=(?:[0-9a-fA-F]+) \([^)]*\([^)]*\)\), half=(?:\d), ident=([0-9a-fA-F]+) landing=([RENWSD-]) departing=\/(.{5})\//;
+const writingWaveletRegex =
+  /^@(\d+) P(\d+)\.(\d+):.*Writing wavelet C(\d+) .+ to OUT_Q\[(\d+)\]/;
+const sendingWaveletRegex =
+  /^@(\d+) P(\d+)\.(\d+):.*Sending wavelet C(\d+) .+ ident:([0-9a-fA-F]{16}) on OUT_Q\[(\d+)\]$/;
+const backpressureRegex =
+  /^@(\d+) P(\d+)\.(\d+):.*Backpressure on C(\d+) for OUT_Q\[(\d+)\]/;
 
 // In JSC (Safari), regex captures and String.substring() return "ropes" —
 // lightweight references into the parent string. Storing a rope long-term
@@ -138,6 +144,30 @@ function classifyPipeStall(msg) {
   return { label: flatStr(msg) };
 }
 
+function parseBackpressure(line) {
+  if (!line.includes("Backpressure on C")) return null;
+  const m = line.match(backpressureRegex);
+  if (!m) return null;
+  return { cycle: parseInt(m[1]), x: parseInt(m[2]), y: parseInt(m[3]), color: parseInt(m[4]) };
+}
+
+function parseWritingWavelet(line) {
+  if (!line.includes("Writing wavelet C")) return null;
+  if (!line.includes("to OUT_Q")) return null;
+  const m = line.match(writingWaveletRegex);
+  if (!m) return null;
+  return { cycle: parseInt(m[1]), x: parseInt(m[2]), y: parseInt(m[3]),
+           color: parseInt(m[4]), q: parseInt(m[5]) };
+}
+
+function parseSendingWavelet(line) {
+  if (!line.includes("Sending wavelet C")) return null;
+  const m = line.match(sendingWaveletRegex);
+  if (!m) return null;
+  return { cycle: parseInt(m[1]), x: parseInt(m[2]), y: parseInt(m[3]),
+           color: parseInt(m[4]), ident: flatStr(m[5]), q: parseInt(m[6]) };
+}
+
 function parsePipeStall(line) {
   if (!line.includes("Msg: stall:")) return null;
   const m = line.match(pipeStallRegex);
@@ -224,11 +254,23 @@ export class TraceParser {
     const seg = await TraceParser.indexSegment(file, 0, file.size, true, onProgress);
     const { peStateIndex, stallLookup } = TraceParser._compactPEState(seg.peStateTemp);
     const waveletIndex = TraceParser._compactWavelets(seg.waveletTemp);
+    // Attach birth/send cycles from pe:writing_wavelet + pe:sending_wavelet events
+    for (const [ident, birth] of seg.sendingTemp) {
+      const wv = waveletIndex.get(ident);
+      if (wv) {
+        wv.birthCycle = birth.writeCycle ?? birth.cycle;
+        wv.sendCycle = birth.cycle;
+      }
+    }
+    // Create synthetic entries for orphan writes (queued but never sent)
+    TraceParser._addOrphanWavelets(waveletIndex, seg.orphanQueuedWavelets);
     const landingIndex = TraceParser._compactLandings(
       seg.tmpLandCycles, seg.tmpLandXs, seg.tmpLandYs, seg.tmpLandColors, seg.tmpLandDirs);
+    const backpressureIndex = TraceParser._buildBackpressureIndex([seg]);
     const pcIndex = TraceParser._rebuildPCMaps(seg.pcMaps);
     return {
-      dimX: seg.dimX, dimY: seg.dimY, landingIndex, peStateIndex, stallLookup,
+      dimX: seg.dimX, dimY: seg.dimY, landingIndex, backpressureIndex,
+      peStateIndex, stallLookup,
       opLookup: seg.opLookup, predLookup: seg.predLookup,
       waveletIndex, hasWaveletData: seg.hasWaveletData,
       minCycle: seg.minCycle, maxCycle: seg.maxCycle,
@@ -247,6 +289,11 @@ export class TraceParser {
     const peStateTemp = new Map();
     const waveletTemp = new Map();
     const tmpLandCycles = [], tmpLandXs = [], tmpLandYs = [], tmpLandColors = [], tmpLandDirs = [];
+    const tmpBpCycles = [], tmpBpXs = [], tmpBpYs = [], tmpBpColors = [];
+    const sendingTemp = new Map(); // ident → { cycle, x, y, writeCycle }
+    const writingFIFO = new Map(); // "x,y,q,color" → [cycle, cycle, ...] (FIFO of write cycles)
+    // Departures per (PE, color) for backpressure direction correlation
+    const tmpDepsByPEColor = new Map(); // "x,y,color" -> [{cycle, dirs}]
     let hasWaveletData = false;
 
     const opIntern = new Map(); opIntern.set(null, 0); opIntern.set("???", 1);
@@ -423,8 +470,41 @@ export class TraceParser {
         entry.cycles.push(wv.cycle); entry.xs.push(wv.x); entry.ys.push(wv.y);
         entry.landings.push(wv.landingEncoded); entry.departings.push(wv.departingEncoded);
         entry.consumed.push(wv.consumed ? 1 : 0);
+        // Collect departures per (PE, color) for backpressure direction correlation
+        if (wv.departingEncoded > 0) {
+          const dpKey = `${wv.x},${wv.y},${wv.color}`;
+          let arr = tmpDepsByPEColor.get(dpKey);
+          if (!arr) { arr = []; tmpDepsByPEColor.set(dpKey, arr); }
+          arr.push(wv.cycle, wv.departingEncoded); // flat pairs: [cycle, dirs, cycle, dirs, ...]
+        }
         return;
       }
+
+      const ww = parseWritingWavelet(line);
+      if (ww) {
+        const wKey = `${ww.x},${ww.y},${ww.q},${ww.color}`;
+        let wq = writingFIFO.get(wKey);
+        if (!wq) { wq = []; writingFIFO.set(wKey, wq); }
+        // Skip same-cycle writes (half-word completion of same wavelet)
+        if (wq.length === 0 || wq[wq.length - 1] !== ww.cycle) wq.push(ww.cycle);
+        return;
+      }
+
+      const sw = parseSendingWavelet(line);
+      if (sw) {
+        if (!sendingTemp.has(sw.ident)) {
+          // Correlate with most recent writing_wavelet via FIFO on (PE, color, OUT_Q)
+          const wKey = `${sw.x},${sw.y},${sw.q},${sw.color}`;
+          const wq = writingFIFO.get(wKey);
+          const writeCycle = (wq && wq.length > 0) ? wq.shift() : null;
+          if (wq && wq.length === 0) writingFIFO.delete(wKey);
+          sendingTemp.set(sw.ident, { cycle: sw.cycle, x: sw.x, y: sw.y, q: sw.q, writeCycle });
+        }
+        return;
+      }
+
+      const bp = parseBackpressure(line);
+      if (bp) { tmpBpCycles.push(bp.cycle); tmpBpXs.push(bp.x); tmpBpYs.push(bp.y); tmpBpColors.push(bp.color); return; }
 
       const stall = parseWaveletStall(line);
       if (stall) { addStall(`${stall.x},${stall.y}`, stall.cycle, `C${stall.color}`, "wavelet"); return; }
@@ -514,11 +594,23 @@ export class TraceParser {
       pcMaps.push([key, entries]);
     }
 
+    // Collect orphan writes: wavelets written to OUT_Q but never sent (e.g., stuck behind backpressure at trace end)
+    const orphanQueuedWavelets = [];
+    for (const [key, cycles] of writingFIFO) {
+      const [x, y, q, color] = key.split(",").map(Number);
+      for (const cycle of cycles) {
+        orphanQueuedWavelets.push({ x, y, q, color, cycle });
+      }
+    }
+
     return {
       dimX, dimY, minCycle, maxCycle, hasWaveletData,
       peStateTemp: [...peStateTemp.entries()],
       waveletTemp: [...waveletTemp.entries()],
       tmpLandCycles, tmpLandXs, tmpLandYs, tmpLandColors, tmpLandDirs,
+      tmpBpCycles, tmpBpXs, tmpBpYs, tmpBpColors, tmpDepsByPEColor: [...tmpDepsByPEColor.entries()],
+      sendingTemp: [...sendingTemp.entries()],
+      orphanQueuedWavelets,
       opLookup, predLookup,
       pcMaps,
     };
@@ -681,6 +773,56 @@ export class TraceParser {
     mp("Compacting wavelets\u2026", 50);
     const waveletIndex = TraceParser._compactWavelets(mergedWav, (f) => mp("Compacting wavelets\u2026", 50 + f * 35));
 
+    // Attach birth/send cycles from pe:writing_wavelet + pe:sending_wavelet events.
+    // Cross-segment reconciliation: a write in segment N may match a send in segment N+1.
+    // Build a merged orphan FIFO per (PE, q, color), then consume from it for sends
+    // missing a writeCycle.
+    const orphanFIFO = new Map(); // "x,y,q,color" -> [cycle, ...]
+    for (const seg of segments) {
+      if (seg.orphanQueuedWavelets) {
+        for (const o of seg.orphanQueuedWavelets) {
+          const key = `${o.x},${o.y},${o.q ?? 0},${o.color}`;
+          let q = orphanFIFO.get(key);
+          if (!q) { q = []; orphanFIFO.set(key, q); }
+          q.push(o.cycle);
+        }
+        seg.orphanQueuedWavelets = null;
+      }
+    }
+    // Sort each FIFO by cycle (segments are in order but within a segment orphans may vary)
+    for (const q of orphanFIFO.values()) { if (q.length > 1) q.sort((a, b) => a - b); }
+
+    for (const seg of segments) {
+      if (seg.sendingTemp) {
+        for (const [ident, birth] of seg.sendingTemp) {
+          const wv = waveletIndex.get(ident);
+          if (wv && wv.birthCycle == null) {
+            // If this send has no writeCycle, try to match from the cross-segment orphan FIFO
+            let wc = birth.writeCycle;
+            if (wc == null) {
+              const key = `${birth.x},${birth.y},${birth.q ?? 0},${wv.color}`;
+              const q = orphanFIFO.get(key);
+              if (q && q.length > 0) {
+                wc = q.shift();
+                if (q.length === 0) orphanFIFO.delete(key);
+              }
+            }
+            wv.birthCycle = wc ?? birth.cycle;
+            wv.sendCycle = birth.cycle;
+          }
+        }
+        seg.sendingTemp = null;
+      }
+    }
+
+    // Remaining orphan FIFO entries are truly unsent wavelets
+    const allOrphans = [];
+    for (const [key, cycles] of orphanFIFO) {
+      const [x, y, q, color] = key.split(",").map(Number);
+      for (const cycle of cycles) allOrphans.push({ x, y, color, cycle });
+    }
+    TraceParser._addOrphanWavelets(waveletIndex, allOrphans);
+
     mp("Merging landings\u2026", 85);
     // 5. Merge and compact landings
     const allLandCycles = [], allLandXs = [], allLandYs = [], allLandColors = [], allLandDirs = [];
@@ -701,10 +843,13 @@ export class TraceParser {
 
     const pcIndex = TraceParser._mergePCMaps(segments);
 
+    // 6. Merge and correlate backpressure events
+    const backpressureIndex = TraceParser._buildBackpressureIndex(segments);
+
     mp("Done", 100);
 
     return { dimX, dimY, landingIndex, peStateIndex, stallLookup, opLookup, predLookup,
-             waveletIndex, hasWaveletData, minCycle, maxCycle, pcIndex };
+             waveletIndex, hasWaveletData, minCycle, maxCycle, pcIndex, backpressureIndex };
   }
 
   // Sort parallel arrays by the cycles array. No-op if already sorted.
@@ -812,7 +957,7 @@ export class TraceParser {
         if (pe.stall[i]) stallIds[i] = internStallReasons(pe.stallReasons[i]);
       }
       peStateIndex.set(key, {
-        cycles: new Float64Array(pe.cycles),
+        cycles: new Uint32Array(pe.cycles),
         busy: new Uint8Array(pe.busy),
         opIds: new Uint8Array(pe.opIds),
         predIds: new Uint8Array(pe.predIds),
@@ -835,7 +980,7 @@ export class TraceParser {
       waveletIndex.set(ident, {
         ident: entry.ident, color: entry.color, ctrl: entry.ctrl, lf: entry.lf,
         hops: {
-          cycles: new Float64Array(entry.cycles),
+          cycles: new Uint32Array(entry.cycles),
           xs: new Uint16Array(entry.xs),
           ys: new Uint16Array(entry.ys),
           landings: new Uint8Array(entry.landings),
@@ -846,6 +991,107 @@ export class TraceParser {
       });
     }
     return waveletIndex;
+  }
+
+  /** Create synthetic wavelet entries for orphan writes (queued in OUT_Q but never sent).
+   *  These appear as permanent red-halo dots at PE center. Each gets a single
+   *  fake hop (landing=R, no departure) so extractBranches can create a waypoint,
+   *  then birthCycle is set to show the dot from the write cycle onward. */
+  static _addOrphanWavelets(waveletIndex, orphans) {
+    for (let i = 0; i < orphans.length; i++) {
+      const o = orphans[i];
+      const ident = `_q${o.x}_${o.y}_${o.color}_${o.cycle}_${i}`;
+      waveletIndex.set(ident, {
+        ident, color: o.color, ctrl: false, lf: false,
+        hops: {
+          cycles: new Uint32Array([o.cycle + 1]),
+          xs: new Uint16Array([o.x]),
+          ys: new Uint16Array([o.y]),
+          landings: new Uint8Array([0]),   // 0 = R (router)
+          departings: new Uint8Array([0]), // no departures
+          consumed: new Uint8Array([0]),
+        },
+        birthCycle: o.cycle,
+        sendCycle: null, // never sent — permanent queued state
+      });
+    }
+  }
+
+  /** Build per-PE backpressure index with direction correlation. */
+  static _buildBackpressureIndex(segments) {
+    // 1. Merge backpressure events and departures across segments
+    const allBp = []; // [{cycle, x, y, color}]
+    const depsByPEColor = new Map(); // "x,y,color" -> flat [cycle, dirs, cycle, dirs, ...]
+    for (const seg of segments) {
+      for (let i = 0; i < seg.tmpBpCycles.length; i++) {
+        allBp.push({ cycle: seg.tmpBpCycles[i], x: seg.tmpBpXs[i], y: seg.tmpBpYs[i], color: seg.tmpBpColors[i] });
+      }
+      for (const [key, flat] of seg.tmpDepsByPEColor) {
+        let arr = depsByPEColor.get(key);
+        if (!arr) { arr = []; depsByPEColor.set(key, arr); }
+        for (let i = 0; i < flat.length; i++) arr.push(flat[i]);
+      }
+      seg.tmpBpCycles = null; seg.tmpBpXs = null; seg.tmpBpYs = null;
+      seg.tmpBpColors = null; seg.tmpDepsByPEColor = null;
+    }
+    if (allBp.length === 0) return null;
+
+    // 2. Sort departures by cycle for binary search
+    for (const [, arr] of depsByPEColor) {
+      // arr is flat pairs [cycle, dirs, cycle, dirs, ...] — sort by cycle
+      const n = arr.length / 2;
+      if (n < 2) continue;
+      const pairs = [];
+      for (let i = 0; i < arr.length; i += 2) pairs.push([arr[i], arr[i + 1]]);
+      pairs.sort((a, b) => a[0] - b[0]);
+      for (let i = 0; i < pairs.length; i++) { arr[i * 2] = pairs[i][0]; arr[i * 2 + 1] = pairs[i][1]; }
+    }
+
+    // 3. Correlate: for each BP event, find next departure → direction bitmask
+    // Direction bitmask: E=1, N=2, W=4, S=8 (matches decodeDeparting encoding)
+    const bpByPE = new Map(); // "x,y" -> [{cycle, dirs}]
+    for (const bp of allBp) {
+      const dpKey = `${bp.x},${bp.y},${bp.color}`;
+      const deps = depsByPEColor.get(dpKey);
+      let dirs = 0; // 0 = unresolved
+      if (deps) {
+        // Binary search for first departure cycle >= bp.cycle
+        let lo = 0, hi = deps.length / 2;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (deps[mid * 2] < bp.cycle) lo = mid + 1;
+          else hi = mid;
+        }
+        if (lo < deps.length / 2) dirs = deps[lo * 2 + 1];
+      }
+
+      const peKey = `${bp.x},${bp.y}`;
+      let arr = bpByPE.get(peKey);
+      if (!arr) { arr = []; bpByPE.set(peKey, arr); }
+      arr.push({ cycle: bp.cycle, dirs });
+    }
+
+    // 4. Compact: per-PE sorted arrays, merging same-cycle events (OR dirs)
+    const index = new Map();
+    for (const [peKey, events] of bpByPE) {
+      events.sort((a, b) => a.cycle - b.cycle);
+      const merged = [];
+      for (const ev of events) {
+        if (merged.length > 0 && merged[merged.length - 1].cycle === ev.cycle) {
+          merged[merged.length - 1].dirs |= ev.dirs;
+        } else {
+          merged.push({ cycle: ev.cycle, dirs: ev.dirs });
+        }
+      }
+      const cycles = new Uint32Array(merged.length);
+      const dirs = new Uint8Array(merged.length);
+      for (let i = 0; i < merged.length; i++) {
+        cycles[i] = merged[i].cycle;
+        dirs[i] = merged[i].dirs;
+      }
+      index.set(peKey, { cycles, dirs });
+    }
+    return index;
   }
 
   static _compactLandings(tmpCycles, tmpXs, tmpYs, tmpColors, tmpDirs) {
@@ -860,7 +1106,7 @@ export class TraceParser {
     const lYs = new Uint16Array(totalLandings);
     const lColors = new Uint8Array(totalLandings);
     const lDirs = new Uint8Array(totalLandings);
-    const lCyclesFlat = new Float64Array(totalLandings);
+    const lCyclesFlat = new Uint32Array(totalLandings);
     for (let i = 0; i < totalLandings; i++) {
       const j = order[i];
       lCyclesFlat[i] = tmpCycles[j];
@@ -884,7 +1130,7 @@ export class TraceParser {
     offsets.push(totalLandings);
 
     return {
-      cycles: new Float64Array(uniqueCycles),
+      cycles: new Uint32Array(uniqueCycles),
       offsets: new Uint32Array(offsets),
       xs: lXs, ys: lYs, colors: lColors, dirs: lDirs,
       length: uniqueCycles.length, totalLandings,
@@ -923,17 +1169,41 @@ export class TraceParser {
    */
   static prepareWaveletList(wavelets) {
     for (const wv of wavelets) {
-      wv.firstCycle = wv.hops.cycles[0];
-      wv.lastCycle = wv.hops.cycles[wv.hops.cycles.length - 1];
+      wv.firstCycle = wv.birthCycle != null
+        ? Math.min(wv.birthCycle, wv.hops.cycles[0])
+        : wv.hops.cycles[0];
+      // Orphan wavelets (sendCycle === null) are permanently queued and should
+      // remain visible until the end of the trace. Use 0xFFFFFFFF (max Uint32)
+      // so they are never filtered out by the per-wavelet lastCycle check.
+      wv.lastCycle = wv.sendCycle === null
+        ? 0xFFFFFFFF  // permanently queued — visible until end of trace
+        : wv.hops.cycles[wv.hops.cycles.length - 1];
     }
     wavelets.sort((a, b) => a.firstCycle - b.firstCycle);
-    const prefMax = new Float64Array(wavelets.length);
+    const prefMax = new Uint32Array(wavelets.length);
     let runMax = -Infinity;
     for (let i = 0; i < wavelets.length; i++) {
       runMax = Math.max(runMax, wavelets[i].lastCycle);
       prefMax[i] = runMax;
     }
     return { waveletList: wavelets, wavPrefMaxLastCycle: prefMax };
+  }
+
+  /** Look up backpressure direction bitmask for a PE at a given cycle.
+   *  Returns -1 if no backpressure, or a bitmask (E=1,N=2,W=4,S=8; 0=unresolved). */
+  static getBackpressure(backpressureIndex, x, y, cycle) {
+    if (!backpressureIndex) return -1;
+    const entry = backpressureIndex.get(`${x},${y}`);
+    if (!entry) return -1;
+    const { cycles, dirs } = entry;
+    let lo = 0, hi = cycles.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cycles[mid] < cycle) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo < cycles.length && cycles[lo] === cycle) return dirs[lo];
+    return -1;
   }
 
   /**

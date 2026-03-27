@@ -125,6 +125,11 @@ function postResult(traceData) {
     transfer.push(h.cycles.buffer, h.xs.buffer, h.ys.buffer,
       h.landings.buffer, h.departings.buffer, h.consumed.buffer);
   }
+  if (traceData.backpressureIndex) {
+    for (const [, entry] of traceData.backpressureIndex) {
+      transfer.push(entry.cycles.buffer, entry.dirs.buffer);
+    }
+  }
 
   const peStateEntries = [...traceData.peStateIndex.entries()];
   const waveletEntries = [...traceData.waveletIndex.entries()];
@@ -156,6 +161,7 @@ function postResult(traceData) {
       minCycle: traceData.minCycle,
       maxCycle: traceData.maxCycle,
       pcEntries,
+      backpressureEntries: traceData.backpressureIndex ? [...traceData.backpressureIndex.entries()] : null,
     },
   }, transfer);
 }

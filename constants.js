@@ -15,6 +15,7 @@ export const PACKET_COLOR_DISC_CTRL = "rgb(255, 130, 180)"; // pink
 export const PACKET_COLOR_HALO_DATA = "rgba(255, 200, 35, 0.3)";
 export const PACKET_COLOR_HALO_CTRL = "rgba(255, 150, 190, 0.3)";
 export const PACKET_COLOR_HALO_LF = "rgba(100, 181, 246, 0.5)"; // last-in-flight: blue
+export const PACKET_COLOR_HALO_QUEUED = "rgba(220, 40, 40, 0.7)"; // queued in OUT_Q: red (matches RAMP_BP)
 export const PACKET_COLOR_LABEL_DATA = "rgba(140, 110, 20, 0.9)";
 export const PACKET_COLOR_LABEL_CTRL = "rgba(120, 50, 80, 0.9)";
 
@@ -22,13 +23,13 @@ export const PACKET_COLOR_LABEL_CTRL = "rgba(120, 50, 80, 0.9)";
 export const PE_COLOR_IDLE = "rgba(45, 58, 90, 0.3)";          // dark blue
 export const PE_COLOR_EXEC = "rgb(100, 181, 246)";             // bright blue
 export const PE_COLOR_FP_ARITH = "rgb(50, 200, 75)";           // deep green
-export const PE_COLOR_FP_FUSED = "rgb(0, 100, 0)";           // darker green (2 FLOPs/cycle)
-export const PE_COLOR_INT_ARITH = "rgb(190, 200, 100)";         // yellow-green
+export const PE_COLOR_FP_FUSED = "rgb(0, 100, 0)";             // darker green (2 FLOPs/cycle)
+export const PE_COLOR_INT_ARITH = "rgb(190, 200, 100)";        // yellow-green
 export const PE_COLOR_CTRL = "rgb(240, 240, 170)";             // cool light yellow
 export const PE_COLOR_TASK = "rgb(180, 180, 190)";             // light grey
-export const PE_COLOR_MEM_READ = "rgb(230, 140, 190)";          // pink-lavender
-export const PE_COLOR_MEM_WRITE = "rgb(245, 170, 115)";         // reddish-orange
-export const PE_COLOR_NOP = "rgba(55, 68, 100, 0.4)";           // slightly lighter than idle
+export const PE_COLOR_MEM_READ = "rgb(230, 140, 190)";         // pink-lavender
+export const PE_COLOR_MEM_WRITE = "rgb(245, 170, 115)";        // reddish-orange
+export const PE_COLOR_NOP = "rgba(55, 68, 100, 0.4)";          // slightly lighter than idle
 export const PE_COLOR_STALL_WAVELET = "rgba(74, 25, 98, 0.5)"; // purple tint
 export const PE_COLOR_STALL_PIPE = "rgba(95, 38, 25, 0.5)";    // reddish-brown tint
 export const PE_SELECT_COLOR = "#ff9800";                      // selection border
@@ -51,6 +52,8 @@ export const RAMP_ON_ACTIVE = "rgb(100, 181, 246)";
 export const RAMP_ON_INACTIVE = "rgba(100, 181, 246, 0.15)";
 export const RAMP_OFF_ACTIVE = "rgb(255, 152, 0)";
 export const RAMP_OFF_INACTIVE = "rgba(255, 152, 0, 0.15)";
+export const RAMP_BP = "rgb(220, 40, 40)";
+export const PE_BP_BORDER = "rgb(220, 40, 40)";
 
 // Demo timing (used by pe.js, packet.js, and demo.js)
 export const DEMO_HOP_DELAY = 100;

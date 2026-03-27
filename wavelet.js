@@ -188,13 +188,43 @@ export function extractBranches(wavelet) {
         lastWp.consumed = true;
         lastWp.lingerUntil = lastWp.cycle + 1;
       }
+      // Orphan wavelets (permanently queued) need the last waypoint to persist
+      // so that endCycle and branch filters don't discard the branch early.
+      if (waypoints[0].queuedUntil === Infinity && !lastWp.lingerUntil) {
+        lastWp.lingerUntil = 0xFFFFFFFF;
+      }
       branches.push(waypoints);
     }
   }
 
+  // Build initial waypoints, optionally prepending a birth waypoint at PE center.
+  // The birth waypoint makes the dot visible from when the wavelet is written to
+  // the output queue (pe:writing_wavelet) or sent (pe:sending_wavelet).
+  // If the wavelet is queued (writeCycle < sendCycle), queuedUntil marks when
+  // the queued state ends — the dot shows a red halo during this period.
   const startWp = { cycle: hops.cycles[0], x: hops.xs[0], y: hops.ys[0],
     arriveDir: LANDING_DECODE[hops.landings[0]], departDir: null, depCycle: null };
-  continueTrace([startWp], startWp.x, startWp.y, startWp.cycle);
+  const initialWaypoints = [startWp];
+
+  if (wavelet.birthCycle != null && startWp.arriveDir === "R" && wavelet.birthCycle < startWp.cycle) {
+    // sendCycle === null means never sent (orphan write) — permanent queued halo.
+    // sendCycle > birthCycle means queuing delay — halo until send.
+    // sendCycle === birthCycle means no delay — no halo.
+    const queuedUntil = wavelet.sendCycle == null ? Infinity
+      : wavelet.sendCycle > wavelet.birthCycle ? wavelet.sendCycle
+      : null;
+    initialWaypoints.unshift({
+      cycle: wavelet.birthCycle,
+      x: startWp.x,
+      y: startWp.y,
+      arriveDir: null,   // born here — null maps to PE center
+      departDir: null,
+      depCycle: null,
+      queuedUntil,       // null if no queuing delay, sendCycle if queued
+    });
+  }
+
+  continueTrace(initialWaypoints, startWp.x, startWp.y, startWp.cycle);
 
   return branches;
 }
@@ -253,14 +283,31 @@ function _rampPos(grid, x, y, dimY, dir, isOnRamp) {
 
 /**
  * TracedPacket animates a wavelet along a single branch.
- * Position is driven by the replay cycle counter.
+ * Position is driven by the replay cycle counter (fc = fractional cycle).
  *
- * Within each PE visit, the wavelet goes through phases:
- *   1. Arrive at on-ramp (arrival cycle)
- *   2. Cross through PE center to off-ramp (between arrival and departure cycles)
- *   3. Transit to next PE's on-ramp (departure cycle to next arrival cycle)
+ * Correlation between simfabric trace events and visual animation:
  *
- * Between integer cycles the position is interpolated for smooth animation.
+ *   Trace event: "landing C{n} from link {E,W,N,S}" at cycle A
+ *   Visual: dot appears at the on-ramp at fc=A.
+ *
+ *   Trace event: "landing=R departing=/     /" at cycle A (router-originated)
+ *   Visual: dot appears at PE center at fc=A.
+ *
+ *   Trace event: "landing=- departing=/{dirs}/" at cycle D (departure)
+ *   Visual: dot crosses from on-ramp (or center) to off-ramp during fc=[D-1, D].
+ *   The crossing animation ENDS at the departure cycle, so the dot reaches
+ *   the off-ramp at fc=D (matching the trace event). The animation starts
+ *   one cycle early (crossStart = D-1) to give it time to play.
+ *
+ *   Trace event: "to_ce_from_q" at cycle A (consumption, same cycle as landing)
+ *   Visual: dot moves from on-ramp to PE center during fc=[A, A+1].
+ *   Consumption is instantaneous in the trace (same cycle as landing), so the
+ *   1-cycle animation is an intentional visual interpolation to make the
+ *   consumption visible. There is no trace event at cycle A+1.
+ *
+ *   For multicast-and-consume (consumed AND forwarded): the dot forks into
+ *   two copies at crossStart. One crosses to the off-ramp (departure), the
+ *   other moves to PE center (consumption). Both start simultaneously.
  */
 export class TracedPacket {
   constructor(waypoints, dimY, color, ctrl, lf) {
@@ -271,7 +318,7 @@ export class TracedPacket {
     this.lf = lf;       // true = last-in-flight
     this.startCycle = waypoints[0].cycle;
     const lastWp = waypoints[waypoints.length - 1];
-    this.endCycle = lastWp.lingerUntil || lastWp.cycle;
+    this.endCycle = lastWp.lingerUntil ?? lastWp.cycle;
     this.fractionalCycle = this.startCycle;
     this.wpIdx = 0;     // cached waypoint index, updated by syncTo
     this.done = false;
@@ -312,26 +359,25 @@ export class TracedPacket {
     const dimY = this.dimY;
 
     // Phase 1: At on-ramp, waiting for departure.
-    // The dot sits at the on-ramp from arrival until one cycle before departure,
-    // then crosses to the off-ramp during the final cycle before departing.
-    // This reflects the physical model: the wavelet is in the fabric switch
-    // being processed, not physically traversing the PE.
+    // Trace: "landing={dir}" at arrivalCycle, "departing=/{dirs}/" at depCycle.
+    // The dot sits at the on-ramp from arrival until crossStart = depCycle - 1,
+    // then crosses to the off-ramp during [depCycle-1, depCycle]. The crossing
+    // ends at depCycle, matching the trace departure event exactly.
     if (depCycle !== null && fc < depCycle) {
       const from = onRampPos(grid, wp.x, wp.y, dimY, wp.arriveDir);
       if (!from) return null;
-      const crossStart = depCycle - 1; // begin crossing one cycle before departure
-      if (fc <= crossStart) return from; // sitting at on-ramp
-      // Crossing from on-ramp to off-ramp in the final cycle
+      const crossStart = depCycle - 1;
+      if (fc <= crossStart) return from;
       const to = offRampPos(grid, wp.x, wp.y, dimY, wp.departDir);
       if (!to) return from;
-      const t = fc - crossStart; // 0..1 over the final cycle
+      const t = fc - crossStart;
       return {
         x: from.x + (to.x - from.x) * t,
         y: from.y + (to.y - from.y) * t,
       };
     }
 
-    // Phase 2: Departing off-ramp → transiting to next PE's on-ramp
+    // Phase 2: Transit from off-ramp to next PE's on-ramp (depCycle to nextWp.cycle)
     if (nextWp && depCycle !== null && fc >= depCycle && fc < nextWp.cycle) {
       const from = offRampPos(grid, wp.x, wp.y, dimY, wp.departDir);
       const to = onRampPos(grid, nextWp.x, nextWp.y, dimY, nextWp.arriveDir);
@@ -351,7 +397,10 @@ export class TracedPacket {
       return offRampPos(grid, wp.x, wp.y, dimY, wp.departDir);
     }
 
-    // Consumed: animate from on-ramp into PE center over one cycle
+    // Consumed: animate from on-ramp into PE center over one cycle.
+    // Trace: "to_ce_from_q" at the same cycle as the landing (instantaneous).
+    // The 1-cycle animation [wp.cycle, wp.cycle+1] is an intentional visual
+    // interpolation — there is no trace event at wp.cycle+1.
     if (wp.consumed) {
       const from = onRampPos(grid, wp.x, wp.y, dimY, wp.arriveDir);
       if (!from) return null;
@@ -377,6 +426,9 @@ export class TracedPacket {
     if (!this.visible) return;
     const pos = this.getCurrentPosition(currentTime, grid);
     if (!pos) return;
-    drawPacketDot(ctx, pos.x, pos.y, this.color, this.ctrl, this.lf);
+    // Show red halo while wavelet is queued in OUT_Q (written but not yet sent)
+    const wp = this.waypoints[this.wpIdx];
+    const queued = wp.queuedUntil != null && this.fractionalCycle < wp.queuedUntil;
+    drawPacketDot(ctx, pos.x, pos.y, this.color, this.ctrl, this.lf, queued);
   }
 }

@@ -3,7 +3,7 @@ import { DataPacket } from "./packet.js";
 import {
   CELL_SIZE, GAP_SIZE, ARROW_DEPTH, RAMP_LATERAL, ARROW_SIZE,
   ZOOM_PREVIEW_COLOR, CORNER_LABEL_COLOR,
-  RAMP_ON_ACTIVE, RAMP_ON_INACTIVE, RAMP_OFF_ACTIVE, RAMP_OFF_INACTIVE,
+  RAMP_ON_ACTIVE, RAMP_ON_INACTIVE, RAMP_OFF_ACTIVE, RAMP_OFF_INACTIVE, RAMP_BP,
 } from "./constants.js";
 
 
@@ -223,6 +223,8 @@ export class Grid {
     }
     // Layer 4: active ramps (over everything)
     if (this.showRamps) this._drawActiveRamps(ctx);
+    // Layer 5: backpressured off-ramps (red, over active ramps)
+    if (this.showRamps) this._drawBackpressureRamps(ctx, minR, maxR, minC, maxC);
     for (const packet of this.packets) packet.draw(ctx, now, this);
     this._drawCornerLabels(ctx, minR, maxR, minC, maxC);
 
@@ -307,6 +309,26 @@ export class Grid {
 
     if (hasOff) { ctx.fillStyle = RAMP_OFF_ACTIVE; ctx.fill(offActive); }
     if (hasOn)  { ctx.fillStyle = RAMP_ON_ACTIVE; ctx.fill(onActive); }
+  }
+
+  _drawBackpressureRamps(ctx, minR, maxR, minC, maxC) {
+    const cols = this.cols;
+    const path = new Path2D();
+    let hasAny = false;
+    for (let row = minR; row <= maxR; row++) {
+      for (let col = minC; col <= maxC; col++) {
+        const pe = this.pes[row * cols + col];
+        const d = pe.bpDirs;
+        if (!d) continue;
+        hasAny = true;
+        const { cx, cy } = pe;
+        if (d & 1) _addRampTriangle(path, cx, cy, "E", false);
+        if (d & 2) _addRampTriangle(path, cx, cy, "N", false);
+        if (d & 4) _addRampTriangle(path, cx, cy, "W", false);
+        if (d & 8) _addRampTriangle(path, cx, cy, "S", false);
+      }
+    }
+    if (hasAny) { ctx.fillStyle = RAMP_BP; ctx.fill(path); }
   }
 
   _drawCornerLabels(ctx, minR, maxR, minC, maxC) {

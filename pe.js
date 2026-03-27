@@ -2,7 +2,7 @@ import {
   CELL_SIZE,
   PE_COLOR_IDLE, PE_COLOR_EXEC, PE_COLOR_FP_ARITH, PE_COLOR_FP_FUSED, PE_COLOR_INT_ARITH, PE_COLOR_CTRL, PE_COLOR_TASK, PE_COLOR_MEM_READ, PE_COLOR_MEM_WRITE,
   PE_COLOR_NOP, PE_COLOR_STALL_WAVELET, PE_COLOR_STALL_PIPE,
-  PE_STALL_TEXT_NOP, PE_STALL_TEXT_WAVELET, PE_STALL_TEXT_PIPE, PE_SELECT_COLOR,
+  PE_STALL_TEXT_NOP, PE_STALL_TEXT_WAVELET, PE_STALL_TEXT_PIPE, PE_SELECT_COLOR, PE_BP_BORDER,
   PE_TEXT_DEFAULT, PE_TEXT_DEFAULT_SUB, PE_TEXT_CTRL, PE_TEXT_CTRL_SUB, PE_TEXT_TASK, PE_TEXT_TASK_SUB,
   DEMO_PE_ON_DURATION, DEMO_PE_BRIGHTEN_DURATION, DEMO_PE_DIM_DURATION,
 } from "./constants.js";
@@ -411,6 +411,8 @@ export class PE {
     // (`!this.op`), which is the more performance-critical case to highlight.
     this.stall = null; // null, "nop", "wavelet", or "pipeline"
     this.stallReason = null; // compact label: "C6", "A0", "R3", "MEM", "S1DS0"
+    this.bpDirs = 0; // backpressure direction bitmask (E=1,N=2,W=4,S=8); 0=none or unresolved-active
+    this.bpActive = false; // true when backpressure is active (bpDirs=0 means unresolved)
     this.fillColor = PE_COLOR_IDLE;
   }
 
@@ -463,6 +465,11 @@ export class PE {
 
     if (this.selected) {
       ctx.strokeStyle = PE_SELECT_COLOR;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(this.x, this.y, CELL_SIZE, CELL_SIZE);
+    } else if (this.bpActive && this.bpDirs === 0) {
+      // Unresolved backpressure: red border (direction unknown)
+      ctx.strokeStyle = PE_BP_BORDER;
       ctx.lineWidth = 2;
       ctx.strokeRect(this.x, this.y, CELL_SIZE, CELL_SIZE);
     }

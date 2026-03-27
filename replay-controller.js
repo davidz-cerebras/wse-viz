@@ -161,6 +161,17 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
     }
   }
 
+  // 1b. Apply backpressure state.
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const pe = pes[row * cols + col];
+      const trX = col, trY = td.dimY - 1 - row;
+      const bp = TraceParser.getBackpressure(td.backpressureIndex, trX, trY, targetCycle);
+      pe.bpActive = bp >= 0;
+      pe.bpDirs = bp >= 0 ? bp : 0;
+    }
+  }
+
   // 2. Create packets for in-flight wavelets or DataPackets for old traces.
   // waveletList is sorted by firstCycle. Two binary searches give the scan range:
   //   - Upper bound: first index where firstCycle > targetCycle (exact)
@@ -183,7 +194,7 @@ function reconstructStateAtCycle(targetCycle, currentCycleLandings) {
       const branches = getBranches(wv);
       for (const waypoints of branches) {
         const lastBranchWp = waypoints[waypoints.length - 1];
-        if ((lastBranchWp.lingerUntil || lastBranchWp.cycle) < targetCycle) continue;
+        if ((lastBranchWp.lingerUntil ?? lastBranchWp.cycle) < targetCycle) continue;
         const pkt = new TracedPacket(waypoints, td.dimY, wv.color, wv.ctrl, wv.lf);
         pkt.syncTo(targetCycle, targetCycle);
         grid.packets.push(pkt);
@@ -559,12 +570,15 @@ function setupPETraceScroll() {
 }
 
 let peSelectGeneration = 0;
+let peSelectAbort = null;
 
 async function selectPEFromServer(row, col, traceX, traceY) {
   grid.selectPE(row, col);
   els.tracePanel.classList.remove("hidden");
   requestAnimationFrame(resizeCanvas);
 
+  if (peSelectAbort) peSelectAbort.abort();
+  peSelectAbort = new AbortController();
   const myGen = ++peSelectGeneration;
   const td = traceData;
   const { minCycle, maxCycle } = state;
@@ -577,7 +591,7 @@ async function selectPEFromServer(row, col, traceX, traceY) {
   }
 
   let resp;
-  try { resp = await fetch(`/api/pe-trace?x=${traceX}&y=${traceY}`); }
+  try { resp = await fetch(`/api/pe-trace?x=${traceX}&y=${traceY}`, { signal: peSelectAbort.signal }); }
   catch { if (myGen === peSelectGeneration) abortSelection(); return; }
   if (myGen !== peSelectGeneration) return;
 
@@ -618,6 +632,8 @@ export function deselectPE() {
   codeViewData = null;
   _lastCodeScrolled = null;
   if (_codeViewAbort) { _codeViewAbort.abort(); _codeViewAbort = null; }
+  if (peSelectAbort) { peSelectAbort.abort(); peSelectAbort = null; }
+  peSelectGeneration++;
   els.codeLog.innerHTML = "";
 }
 
@@ -1028,8 +1044,8 @@ function applyServerState(data) {
   // Apply PE states
   const cols = grid.cols;
   const pes = grid.pes;
-  // Reset all PEs to idle first
-  for (const pe of pes) pe.setBusy(false, null, null);
+  // Reset all PEs to idle first, clear backpressure
+  for (const pe of pes) { pe.setBusy(false, null, null); pe.bpActive = false; pe.bpDirs = 0; }
 
   for (const rec of data.pes) {
     const [row, col, busy, opId, stallType, stallReason] = rec;
@@ -1049,12 +1065,23 @@ function applyServerState(data) {
     const waypoints = branchTuples.map(t => {
       const wp = { cycle: t[0], x: t[1], y: t[2],
         arriveDir: t[3], departDir: t[4], depCycle: t[5], consumed: !!t[6] };
-      if (t[7]) wp.lingerUntil = t[7];
+      if (t[7]) wp.lingerUntil = t[7] === -1 ? 0xFFFFFFFF : t[7];
+      if (t[8]) wp.queuedUntil = t[8] === -1 ? Infinity : t[8];
       return wp;
     });
     const pkt = new TracedPacket(waypoints, td.dimY, color, ctrl, lf);
     pkt.syncTo(state.currentCycle, state.currentCycle);
     grid.packets.push(pkt);
+  }
+
+  // Apply backpressure state
+  if (data.bps) {
+    for (const [row, col, dirs] of data.bps) {
+      if (row < 0 || row >= grid.rows || col < 0 || col >= cols) continue;
+      const pe = pes[row * cols + col];
+      pe.bpActive = true;
+      pe.bpDirs = dirs;
+    }
   }
 }
 
@@ -1273,6 +1300,15 @@ export function handleTraceFile(event, setGrid) {
       // Rebuild pcIndex from serialized pcEntries
       const pcIndex = TraceParser._rebuildPCMaps(d.pcEntries || []);
 
+      // Rebuild backpressureIndex from serialized entries
+      let backpressureIndex = null;
+      if (d.backpressureEntries) {
+        backpressureIndex = new Map();
+        for (const [key, entry] of d.backpressureEntries) {
+          backpressureIndex.set(key, entry);
+        }
+      }
+
       const td = {
         dimX: d.dimX,
         dimY: d.dimY,
@@ -1290,6 +1326,7 @@ export function handleTraceFile(event, setGrid) {
         minCycle: d.minCycle,
         maxCycle: d.maxCycle,
         pcIndex,
+        backpressureIndex,
       };
 
       els.loadingBar.classList.add("hidden");
